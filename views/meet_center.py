@@ -855,7 +855,7 @@ def render_meet_center_view(
         )
 
         rep_c2.markdown("**Meet Program (Heat Sheet)**")
-        rep_c2.caption("3-column heat sheet with heats, lanes, relay legs & seed times.")
+        rep_c2.caption("2-column heat sheet with heats, lanes, relay legs & seed times.")
         rep_c2.download_button(
             "Download Meet Program / Heat Sheet (HTML)",
             data=render_meet_program_html(
