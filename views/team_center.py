@@ -77,9 +77,6 @@ def render_team_center_view(
                 use_container_width=True,
                 hide_index=True,
             )
-        
-        if roster:
-            st.dataframe(roster, use_container_width=True, hide_index=True)
         else:
             st.info("No active athletes on this season roster yet.")
 
