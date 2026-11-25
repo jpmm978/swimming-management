@@ -120,6 +120,19 @@ def parse_time_to_ms(raw: str) -> Optional[int]:
     text = raw.strip().upper()
     if not text or text in {"NT", "NS", "DQ", "SCR"}:
         return None
+    if ":" not in text and "." not in text and text.isdigit():
+        if len(text) <= 2:
+            hundredths = int(text)
+            return hundredths * 10
+        hundredths = int(text[-2:])
+        rem = text[:-2]
+        if len(rem) > 2:
+            minutes = int(rem[:-2])
+            seconds = int(rem[-2:])
+        else:
+            minutes = 0
+            seconds = int(rem)
+        return int(round((minutes * 60 + seconds) * 1000)) + (hundredths * 10)
     if ":" in text:
         mins_str, secs_str = text.split(":", 1)
         minutes = int(mins_str)
@@ -297,3 +310,11 @@ def score_event_performances(
         )
 
     return results
+```[cite: 21]
+
+### How Plain Digits Map
+* `2415` → `24.15` seconds (`24,150` ms)
+* `10240` → `1:02.40` (`62,400` ms)
+* `24.15` or `1:02.40` → continues to work identically
+
+Paste this into `core_logic/meet_engine.py`, commit to `main`, and let Streamlit Cloud reload. Would you like to test digit entry on a seed time or pool-deck result next?
