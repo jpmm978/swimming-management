@@ -14,7 +14,7 @@ from core_logic.meet_engine import (
     PerformanceInput,
     ScoredPerformance,
     assign_center_out_lanes,
-    format_event_label,
+    assign_dual_meet_odd_even_lanes,
     format_time_ms,
     get_relay_seeding_notices,
     parse_time_to_ms,
@@ -526,6 +526,33 @@ def render_meet_center_view(
             for notice in relay_notices:
                 st.info(notice)
 
+        st.divider()
+        st.subheader("Heat & Lane Seeding")
+        sm1, sm2, sm3 = st.columns([1.4, 1.3, 1.3])
+        seeding_mode = sm1.selectbox(
+            "Seeding Mode",
+            options=["Dual-Meet Odd / Even Lanes", "Center-Out (All Lanes)"],
+            key=f"seeding_mode_{selected_meet.id}",
+        )
+        default_odd_idx = teams.index(selected_team) if selected_team in teams else 0
+        odd_team = sm2.selectbox(
+            "Odd Lanes Team (1, 3, 5...)",
+            options=teams,
+            index=default_odd_idx,
+            disabled=(seeding_mode != "Dual-Meet Odd / Even Lanes"),
+            format_func=lambda t: f"{t.code} — {t.name}",
+            key=f"odd_lanes_team_{selected_meet.id}",
+        )
+        even_candidates = [t for t in teams if t.id != odd_team.id] or teams
+        even_team = sm3.selectbox(
+            "Even Lanes Team (2, 4, 6...)",
+            options=even_candidates,
+            index=0,
+            disabled=(seeding_mode != "Dual-Meet Odd / Even Lanes"),
+            format_func=lambda t: f"{t.code} — {t.name}",
+            key=f"even_lanes_team_{selected_meet.id}",
+        )
+
         ev_filter = st.selectbox(
             "Preview Heats & Lane Seeding for Event",
             options=MIAA_STANDARD_EVENTS,
@@ -533,7 +560,15 @@ def render_meet_center_view(
             key="seed_preview_event",
         )
         ev_entries = [c for c in candidates if c.event_code == ev_filter.code]
-        seeded = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
+        if seeding_mode == "Dual-Meet Odd / Even Lanes":
+            seeded = assign_dual_meet_odd_even_lanes(
+                ev_entries,
+                odd_team_id=odd_team.id,
+                even_team_id=even_team.id,
+                lane_count=selected_meet.lane_count,
+            )
+        else:
+            seeded = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
 
         db_entry_by_id = {e.id: e for e in db_entries if e.event_code == ev_filter.code}
         for row in seeded:
