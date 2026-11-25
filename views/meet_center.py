@@ -14,7 +14,9 @@ from core_logic.meet_engine import (
     PerformanceInput,
     ScoredPerformance,
     assign_center_out_lanes,
+    format_event_label,
     format_time_ms,
+    get_relay_seeding_notices,
     parse_time_to_ms,
     score_event_performances,
     validate_nfhs_entries,
@@ -511,13 +513,18 @@ def render_meet_center_view(
                             )
                             st.rerun()
 
-        violations = validate_nfhs_entries(candidates)
+        violations = validate_nfhs_entries(candidates, lane_count=selected_meet.lane_count)
+        relay_notices = get_relay_seeding_notices(candidates)
         if violations:
             st.error("NFHS Entry-Limit Validation Warnings:")
             for v in violations:
                 st.write(f"- {v}")
         elif candidates:
             st.success(f"All {len(candidates)} entries pass NFHS dual-meet limits.")
+
+        if relay_notices:
+            for notice in relay_notices:
+                st.info(notice)
 
         ev_filter = st.selectbox(
             "Preview Heats & Lane Seeding for Event",
