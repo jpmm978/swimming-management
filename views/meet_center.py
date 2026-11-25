@@ -30,6 +30,7 @@ from db.schema import (
     Organization,
     ResultState,
     Season,
+    SeasonRoster,
     Team,
     User,
 )
@@ -108,10 +109,22 @@ def render_meet_center_view(
         return
 
     with repo.session() as session:
-        teams = list(session.scalars(select(Team).where(Team.is_active.is_(True))).all())
+        teams = list(session.scalars(select(Team).where(Team.is_active.is_(True)).order_by(Team.code)).all())
         team_map = {t.id: t for t in teams}
-        athletes = list(session.scalars(select(Athlete).where(Athlete.is_active.is_(True))).all())
+        athletes = list(
+            session.scalars(
+                select(Athlete).where(Athlete.is_active.is_(True)).order_by(Athlete.last_name, Athlete.first_name)
+            ).all()
+        )
         athlete_map = {a.id: a for a in athletes}
+        season_rosters = list(
+            session.scalars(
+                select(SeasonRoster).where(
+                    SeasonRoster.season_id == selected_meet.season_id,
+                    SeasonRoster.status == "active",
+                )
+            ).all()
+        )
         db_entries = list(
             session.scalars(select(Entry).where(Entry.meet_id == selected_meet.id).order_by(Entry.id)).all()
         )
@@ -119,6 +132,11 @@ def render_meet_center_view(
             r.entry_id: r
             for r in session.scalars(select(OfficialResult).where(OfficialResult.meet_id == selected_meet.id)).all()
         }
+
+    # Map each team_id to its active season roster athletes
+    athlete_ids_by_team: dict[int, set[int]] = {}
+    for sr in season_rosters:
+        athlete_ids_by_team.setdefault(sr.team_id, set()).add(sr.athlete_id)
 
     candidates: list[EntryCandidate] = []
     for e in db_entries:
@@ -140,42 +158,144 @@ def render_meet_center_view(
         )
 
     with tab_entries:
-        if active_user and not selected_meet.is_locked:
-            with st.expander("Add Individual or Relay Entry", expanded=len(candidates) == 0):
-                with st.form("add_meet_entry_form"):
-                    c1, c2, c3 = st.columns(3)
-                    entry_team = c1.selectbox(
+        if active_user and not selected_meet.is_locked and teams:
+            with st.expander("SwimTopia-Style Individual Event Checkboxes", expanded=True):
+                sw_c1, sw_c2, sw_c3 = st.columns([1.3, 1.7, 1.0])
+                matrix_team = sw_c1.selectbox(
+                    "Entry Team",
+                    options=teams,
+                    index=teams.index(selected_team) if selected_team in teams else 0,
+                    format_func=lambda t: f"{t.name} ({t.code})",
+                    key="matrix_entry_team",
+                )
+                roster_ids = athlete_ids_by_team.get(matrix_team.id, set())
+                team_athletes = [a for a in athletes if a.id in roster_ids] if roster_ids else []
+
+                if not team_athletes:
+                    st.info(
+                        f"No active athletes found on **{matrix_team.name} ({matrix_team.code})** for this season. "
+                        "Switch to this team in **Team Center** to add or import its swimmers first."
+                    )
+                else:
+                    matrix_athlete = sw_c2.selectbox(
+                        "Select Swimmer",
+                        options=team_athletes,
+                        format_func=lambda a: f"{a.last_name}, {a.first_name} ({a.gender or '?'})",
+                        key="matrix_entry_athlete",
+                    )
+                    matrix_exh = sw_c3.checkbox("Exhibition Swimmer", value=False, key="matrix_entry_exh")
+
+                    existing_for_swimmer = [
+                        e for e in db_entries if e.athlete_id == matrix_athlete.id
+                    ]
+                    existing_event_codes = {e.event_code for e in existing_for_swimmer}
+
+                    indiv_events = [
+                        ev
+                        for ev in MIAA_STANDARD_EVENTS
+                        if not ev.is_relay
+                        and (
+                            matrix_athlete.gender is None
+                            or (matrix_athlete.gender == "M" and ev.gender == "B")
+                            or (matrix_athlete.gender == "F" and ev.gender == "G")
+                            or matrix_athlete.gender == "X"
+                        )
+                    ]
+
+                    selected_event_seeds: dict[str, str] = {}
+                    checked_events: list[str] = []
+
+                    st.markdown("**Check events to enter (NFHS limit: max 2 individual / 4 total events per meet):**")
+                    for ev in indiv_events:
+                        r_cols = st.columns([2.4, 1.2, 0.8])
+                        already_in = ev.code in existing_event_codes
+                        is_checked = r_cols[0].checkbox(
+                            f"#{ev.event_number} · {ev.name}" + (" *(already entered)*" if already_in else ""),
+                            value=False,
+                            disabled=already_in,
+                            key=f"chk_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
+                        )
+                        seed_val = r_cols[1].text_input(
+                            f"Seed for {ev.code}",
+                            value="NT",
+                            disabled=not is_checked,
+                            key=f"seed_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
+                            label_visibility="collapsed",
+                        )
+                        r_cols[2].caption("Diving" if ev.is_diving else "Swim")
+                        if is_checked and not already_in:
+                            checked_events.append(ev.code)
+                            selected_event_seeds[ev.code] = seed_val
+
+                    projected_indiv = len([e for e in existing_for_swimmer if not e.is_relay]) + len(checked_events)
+                    projected_total = len(existing_for_swimmer) + len(checked_events)
+
+                    st.caption(
+                        f"Swimmer Event Load after save: **{projected_indiv}/2 Individual** · "
+                        f"**{projected_total}/4 Total Events**"
+                    )
+                    if projected_indiv > 2 or projected_total > 4:
+                        st.warning("Heads up: This selection exceeds standard NFHS per-swimmer entry limits.")
+
+                    if st.button("Save Checked Events for Swimmer", type="primary", key="save_checkbox_entries"):
+                        if not checked_events:
+                            st.info("Check at least one event above before saving.")
+                        else:
+                            with repo.session() as session:
+                                for ev_code in checked_events:
+                                    ev_spec = EVENT_BY_CODE[ev_code]
+                                    session.add(
+                                        Entry(
+                                            meet_id=selected_meet.id,
+                                            team_id=matrix_team.id,
+                                            athlete_id=matrix_athlete.id,
+                                            event_code=ev_code,
+                                            is_relay=False,
+                                            is_exhibition=matrix_exh,
+                                            seed_time_ms=(
+                                                None
+                                                if ev_spec.is_diving
+                                                else parse_time_to_ms(selected_event_seeds.get(ev_code, "NT"))
+                                            ),
+                                        )
+                                    )
+                                session.commit()
+                            st.success(
+                                f"Added {len(checked_events)} event entry/entries for "
+                                f"{matrix_athlete.first_name} {matrix_athlete.last_name}."
+                            )
+                            st.rerun()
+
+            with st.expander("Add Relay Team Entry", expanded=False):
+                with st.form("add_relay_entry_form"):
+                    rc1, rc2, rc3, rc4 = st.columns([1.3, 1.8, 1.1, 0.8])
+                    relay_team = rc1.selectbox(
                         "Team",
                         options=teams,
                         index=teams.index(selected_team) if selected_team in teams else 0,
                         format_func=lambda t: f"{t.name} ({t.code})",
+                        key="relay_entry_team",
                     )
-                    ev_spec = c2.selectbox(
-                        "Event",
-                        options=MIAA_STANDARD_EVENTS,
+                    relay_ev = rc2.selectbox(
+                        "Relay Event",
+                        options=[ev for ev in MIAA_STANDARD_EVENTS if ev.is_relay],
                         format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
+                        key="relay_entry_event",
                     )
-                    seed_str = c3.text_input("Seed Time (e.g. 24.15 or 1:02.40)", value="NT")
+                    relay_seed = rc3.text_input("Seed Time", value="NT", key="relay_entry_seed")
+                    relay_exh = rc4.checkbox("Exhibition", value=False, key="relay_entry_exh")
 
-                    c4, c5 = st.columns([2, 1])
-                    athlete_choice = c4.selectbox(
-                        "Athlete (leave blank for Relay)",
-                        options=[None] + athletes,
-                        format_func=lambda a: "Relay Team Entry" if a is None else f"{a.last_name}, {a.first_name}",
-                    )
-                    is_exh = c5.checkbox("Exhibition Entry", value=False)
-
-                    if st.form_submit_button("Add Entry", type="primary"):
+                    if st.form_submit_button("Add Relay Entry", type="primary"):
                         with repo.session() as session:
                             session.add(
                                 Entry(
                                     meet_id=selected_meet.id,
-                                    team_id=entry_team.id,
-                                    athlete_id=athlete_choice.id if (athlete_choice and not ev_spec.is_relay) else None,
-                                    event_code=ev_spec.code,
-                                    is_relay=ev_spec.is_relay,
-                                    is_exhibition=is_exh,
-                                    seed_time_ms=parse_time_to_ms(seed_str),
+                                    team_id=relay_team.id,
+                                    athlete_id=None,
+                                    event_code=relay_ev.code,
+                                    is_relay=True,
+                                    is_exhibition=relay_exh,
+                                    seed_time_ms=parse_time_to_ms(relay_seed),
                                 )
                             )
                             session.commit()
