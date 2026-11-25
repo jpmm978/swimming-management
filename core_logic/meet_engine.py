@@ -143,24 +143,32 @@ def parse_time_to_ms(raw: str) -> Optional[int]:
     return int(round((minutes * 60 + seconds) * 1000))
 
 
-def validate_nfhs_entries(entries: list[EntryCandidate]) -> list[str]:
+def validate_nfhs_entries(entries: list[EntryCandidate], lane_count: int = 6) -> list[str]:
     violations: list[str] = []
     athlete_total: dict[int, int] = {}
     athlete_indiv: dict[int, int] = {}
     athlete_names: dict[int, str] = {}
     team_event_scoring_count: dict[tuple[int, str], int] = {}
+    team_relay_total_count: dict[tuple[int, str], int] = {}
+    team_code_map: dict[int, str] = {}
+
+    max_total_relays = 2 if lane_count <= 4 else 3
 
     for e in entries:
+        team_code_map[e.team_id] = e.team_code
         spec = EVENT_BY_CODE.get(e.event_code)
         is_relay = spec.is_relay if spec else e.is_relay
 
-        if not e.is_exhibition:
+        if is_relay:
+            r_key = (e.team_id, e.event_code)
+            team_relay_total_count[r_key] = team_relay_total_count.get(r_key, 0) + 1
+
+        if not e.is_exhibition and not is_relay:
             key = (e.team_id, e.event_code)
             team_event_scoring_count[key] = team_event_scoring_count.get(key, 0) + 1
-            limit = 2 if is_relay else 3
-            if team_event_scoring_count[key] > limit:
+            if team_event_scoring_count[key] > 3:
                 violations.append(
-                    f"Team {e.team_code} exceeds {limit} scoring entries in {e.event_code}."
+                    f"Team {e.team_code} exceeds 3 scoring entries in {e.event_code}."
                 )
 
         if is_relay:
@@ -170,6 +178,14 @@ def validate_nfhs_entries(entries: list[EntryCandidate]) -> list[str]:
             athlete_names[e.athlete_id] = e.athlete_name or f"Athlete #{e.athlete_id}"
             athlete_total[e.athlete_id] = athlete_total.get(e.athlete_id, 0) + 1
             athlete_indiv[e.athlete_id] = athlete_indiv.get(e.athlete_id, 0) + 1
+
+    for (tid, ev_code), total_relays in team_relay_total_count.items():
+        if total_relays > max_total_relays:
+            t_code = team_code_map.get(tid, f"Team #{tid}")
+            violations.append(
+                f"NFHS Rule 3-2: Team {t_code} entered {total_relays} relays in {ev_code} "
+                f"(max {max_total_relays} relay teams per school in a {lane_count}-lane pool)."
+            )
 
     for aid, total in athlete_total.items():
         name = athlete_names.get(aid, f"Athlete #{aid}")
@@ -231,6 +247,7 @@ def score_event_performances(
     is_diving: bool = False,
 ) -> list[ScoredPerformance]:
     points_table = RELAY_POINTS_6_LANE if is_relay else INDIVIDUAL_POINTS_6_LANE
+    max_scoring_per_team = 2 if is_relay else 3
 
     valid_contenders: list[PerformanceInput] = []
     non_scoring: list[PerformanceInput] = []
@@ -247,6 +264,14 @@ def score_event_performances(
     else:
         valid_contenders.sort(key=lambda p: p.final_time_ms or 999_999_999)
 
+    team_scoring_used: dict[int, int] = {}
+    point_eligible_entries: set[int] = set()
+    for p in valid_contenders:
+        used = team_scoring_used.get(p.team_id, 0)
+        if used < max_scoring_per_team:
+            team_scoring_used[p.team_id] = used + 1
+            point_eligible_entries.add(p.entry_id)
+
     results: list[ScoredPerformance] = []
     idx = 0
     n = len(valid_contenders)
@@ -262,19 +287,29 @@ def score_event_performances(
                 break
             tie_end += 1
 
-        tie_count = tie_end - idx
         place = idx + 1
+        eligible_in_group = [
+            valid_contenders[pos]
+            for pos in range(idx, tie_end)
+            if valid_contenders[pos].entry_id in point_eligible_entries
+        ]
+
         pooled_points = Decimal("0.00")
         for pos in range(idx, tie_end):
             if pos < len(points_table):
                 pooled_points += points_table[pos]
 
-        split_points = (pooled_points / Decimal(tie_count)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
+        split_points = (
+            (pooled_points / Decimal(len(eligible_in_group))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if eligible_in_group
+            else Decimal("0.00")
         )
 
         for pos in range(idx, tie_end):
             p = valid_contenders[pos]
+            is_eligible = p.entry_id in point_eligible_entries
             results.append(
                 ScoredPerformance(
                     entry_id=p.entry_id,
@@ -287,7 +322,7 @@ def score_event_performances(
                     final_time_ms=p.final_time_ms,
                     diving_score=p.diving_score,
                     place=place,
-                    points=split_points,
+                    points=split_points if is_eligible else Decimal("0.00"),
                 )
             )
         idx = tie_end
