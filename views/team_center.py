@@ -27,6 +27,28 @@ def render_team_center_view(
         f"Season: **{selected_season.label}**"
     )
 
+    if active_user is not None:
+        with st.expander("Create New Team", expanded=False):
+            with st.form("team_center_create_team"):
+                t1, t2, t3 = st.columns([2, 1, 1.2])
+                new_team_name = t1.text_input("Team Name", placeholder="e.g., Opposing High School")
+                new_team_code = t2.text_input("Code / Abbr", placeholder="e.g., OPP", max_chars=10)
+                new_division = t3.text_input("Division", value="Division 1")
+                if st.form_submit_button("Create Team", type="primary"):
+                    try:
+                        created = repo.create_team(
+                            actor_user_id=active_user.id,
+                            org_id=selected_org.id,
+                            name=new_team_name,
+                            code=new_team_code,
+                            division_label=new_division or None,
+                        )
+                        st.session_state["selected_team_id"] = created.id
+                        st.success(f"Created team {created.name} ({created.code}).")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not create team: {exc}")
+
     tab_roster, tab_import, tab_rollover = st.tabs(
         ["Active Roster & Add", "Import CSV / HY-TEK", "Season Rollover & Export"]
     )
