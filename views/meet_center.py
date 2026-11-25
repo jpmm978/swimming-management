@@ -164,7 +164,6 @@ def render_meet_center_view(
         f"lane_overrides_meet_{selected_meet.id}", {}
     )
 
-    # Track fallback squad letters if older relay entries exist without metadata
     auto_squad_counter: dict[tuple[int, str], int] = {}
     squad_letters = ["A", "B", "C", "D"]
 
@@ -226,7 +225,6 @@ def render_meet_center_view(
                 )
             )
 
-    # Helper to count current events per athlete across individual + relay entries
     def _athlete_event_counts(athlete_id: int) -> tuple[int, int]:
         indiv = 0
         relays = 0
@@ -240,7 +238,7 @@ def render_meet_center_view(
     with tab_entries:
         if active_user and not selected_meet.is_locked and teams:
             with st.expander("1. Individual Event Checkboxes (SwimTopia Style)", expanded=True):
-                sw_c1, sw_c2, sw_c3 = st.columns([1.3, 1.7, 1.0])
+                sw_c1, sw_c2 = st.columns([1.4, 2.0])
                 matrix_team = sw_c1.selectbox(
                     "Entry Team",
                     options=teams,
@@ -263,10 +261,11 @@ def render_meet_center_view(
                         format_func=lambda a: f"{a.last_name}, {a.first_name} ({a.gender or '?'})",
                         key="matrix_entry_athlete",
                     )
-                    matrix_exh = sw_c3.checkbox("Exhibition Swimmer", value=False, key="matrix_entry_exh")
 
-                    existing_indiv_codes = {
-                        c.event_code for c in candidates if not c.is_relay and c.athlete_id == matrix_athlete.id
+                    existing_indiv_by_code = {
+                        c.event_code: c
+                        for c in candidates
+                        if not c.is_relay and c.athlete_id == matrix_athlete.id
                     }
                     cur_indiv, cur_total = _athlete_event_counts(matrix_athlete.id)
 
@@ -284,14 +283,29 @@ def render_meet_center_view(
                     ]
 
                     selected_event_seeds: dict[str, str] = {}
+                    selected_event_exh: dict[str, bool] = {}
                     checked_indiv_events: list[str] = []
 
                     st.markdown("**Check individual events (NFHS limit: max 2 individual / 4 total events):**")
+                    hdr_cols = st.columns([2.3, 1.1, 0.7, 0.7])
+                    hdr_cols[0].caption("Event")
+                    hdr_cols[1].caption("Seed Time / Pts")
+                    hdr_cols[2].caption("EXH")
+                    hdr_cols[3].caption("Type")
+
                     for ev in indiv_events:
-                        r_cols = st.columns([2.4, 1.2, 0.8])
-                        already_in = ev.code in existing_indiv_codes
+                        r_cols = st.columns([2.3, 1.1, 0.7, 0.7])
+                        existing_entry = existing_indiv_by_code.get(ev.code)
+                        already_in = existing_entry is not None
+                        existing_suffix = (
+                            " *(already entered — EXH)*"
+                            if (existing_entry and existing_entry.is_exhibition)
+                            else " *(already entered)*"
+                            if already_in
+                            else ""
+                        )
                         is_checked = r_cols[0].checkbox(
-                            f"#{ev.event_number} · {ev.name}" + (" *(already entered)*" if already_in else ""),
+                            f"#{ev.event_number} · {ev.name}{existing_suffix}",
                             value=False,
                             disabled=already_in,
                             key=f"chk_ind_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
@@ -303,10 +317,17 @@ def render_meet_center_view(
                             key=f"seed_ind_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
                             label_visibility="collapsed",
                         )
-                        r_cols[2].caption("Diving" if ev.is_diving else "Swim")
+                        is_ev_exh = r_cols[2].checkbox(
+                            "EXH",
+                            value=existing_entry.is_exhibition if existing_entry else False,
+                            disabled=not is_checked,
+                            key=f"exh_ind_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
+                        )
+                        r_cols[3].caption("Diving" if ev.is_diving else "Swim")
                         if is_checked and not already_in:
                             checked_indiv_events.append(ev.code)
                             selected_event_seeds[ev.code] = seed_val
+                            selected_event_exh[ev.code] = is_ev_exh
 
                     proj_indiv = cur_indiv + len(checked_indiv_events)
                     proj_total = cur_total + len(checked_indiv_events)
@@ -331,7 +352,7 @@ def render_meet_center_view(
                                             athlete_id=matrix_athlete.id,
                                             event_code=ev_code,
                                             is_relay=False,
-                                            is_exhibition=matrix_exh,
+                                            is_exhibition=selected_event_exh.get(ev_code, False),
                                             seed_time_ms=(
                                                 None
                                                 if ev_spec.is_diving
@@ -390,7 +411,6 @@ def render_meet_center_view(
                         f"No eligible swimmers on **{relay_team.name} ({relay_team.code})** for {relay_ev.name}."
                     )
                 else:
-                    # Check if this team + event + squad already exists to pre-fill legs
                     existing_squad_entry: Entry | None = None
                     existing_legs: list[int] = []
                     for c in candidates:
