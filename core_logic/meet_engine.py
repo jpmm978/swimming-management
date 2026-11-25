@@ -45,6 +45,12 @@ MIAA_STANDARD_EVENTS: list[EventSpec] = [
 
 EVENT_BY_CODE: dict[str, EventSpec] = {ev.code: ev for ev in MIAA_STANDARD_EVENTS}
 
+
+def format_event_label(event_code: str) -> str:
+    spec = EVENT_BY_CODE.get(event_code)
+    return f"Event #{spec.event_number} · {spec.name}" if spec else event_code
+
+
 INDIVIDUAL_POINTS_6_LANE: list[Decimal] = [
     Decimal("6.00"),
     Decimal("4.00"),
@@ -148,11 +154,12 @@ def validate_nfhs_entries(entries: list[EntryCandidate], lane_count: int = 6) ->
     athlete_total: dict[int, int] = {}
     athlete_indiv: dict[int, int] = {}
     athlete_names: dict[int, str] = {}
-    team_event_scoring_count: dict[tuple[int, str], int] = {}
+    team_indiv_scoring_count: dict[tuple[int, str], int] = {}
     team_relay_total_count: dict[tuple[int, str], int] = {}
     team_code_map: dict[int, str] = {}
 
     max_total_relays = 2 if lane_count <= 4 else 3
+    max_scoring_indiv = 2 if lane_count <= 4 else 3
 
     for e in entries:
         team_code_map[e.team_id] = e.team_code
@@ -162,29 +169,29 @@ def validate_nfhs_entries(entries: list[EntryCandidate], lane_count: int = 6) ->
         if is_relay:
             r_key = (e.team_id, e.event_code)
             team_relay_total_count[r_key] = team_relay_total_count.get(r_key, 0) + 1
-
-        if not e.is_exhibition and not is_relay:
-            key = (e.team_id, e.event_code)
-            team_event_scoring_count[key] = team_event_scoring_count.get(key, 0) + 1
-            if team_event_scoring_count[key] > 3:
-                violations.append(
-                    f"Team {e.team_code} exceeds 3 scoring entries in {e.event_code}."
-                )
-
-        if is_relay:
             for aid in e.relay_member_ids:
                 athlete_total[aid] = athlete_total.get(aid, 0) + 1
-        elif e.athlete_id is not None:
-            athlete_names[e.athlete_id] = e.athlete_name or f"Athlete #{e.athlete_id}"
-            athlete_total[e.athlete_id] = athlete_total.get(e.athlete_id, 0) + 1
-            athlete_indiv[e.athlete_id] = athlete_indiv.get(e.athlete_id, 0) + 1
+        else:
+            if not e.is_exhibition:
+                key = (e.team_id, e.event_code)
+                team_indiv_scoring_count[key] = team_indiv_scoring_count.get(key, 0) + 1
+                if team_indiv_scoring_count[key] > max_scoring_indiv:
+                    violations.append(
+                        f"Team {e.team_code} exceeds {max_scoring_indiv} scoring entries in "
+                        f"{format_event_label(e.event_code)}."
+                    )
+            if e.athlete_id is not None:
+                athlete_names[e.athlete_id] = e.athlete_name or f"Athlete #{e.athlete_id}"
+                athlete_total[e.athlete_id] = athlete_total.get(e.athlete_id, 0) + 1
+                athlete_indiv[e.athlete_id] = athlete_indiv.get(e.athlete_id, 0) + 1
 
     for (tid, ev_code), total_relays in team_relay_total_count.items():
         if total_relays > max_total_relays:
             t_code = team_code_map.get(tid, f"Team #{tid}")
             violations.append(
-                f"NFHS Rule 3-2: Team {t_code} entered {total_relays} relays in {ev_code} "
-                f"(max {max_total_relays} relay teams per school in a {lane_count}-lane pool)."
+                f"NFHS Rule 3-2: Team {t_code} entered {total_relays} relays in "
+                f"{format_event_label(ev_code)} (max {max_total_relays} relay teams per school "
+                f"in a {lane_count}-lane pool)."
             )
 
     for aid, total in athlete_total.items():
@@ -197,6 +204,30 @@ def validate_nfhs_entries(entries: list[EntryCandidate], lane_count: int = 6) ->
             )
 
     return violations
+
+
+def get_relay_seeding_notices(entries: list[EntryCandidate]) -> list[str]:
+    notices: list[str] = []
+    team_relay_counts: dict[tuple[int, str], int] = {}
+    team_code_map: dict[int, str] = {}
+
+    for e in entries:
+        team_code_map[e.team_id] = e.team_code
+        spec = EVENT_BY_CODE.get(e.event_code)
+        is_relay = spec.is_relay if spec else e.is_relay
+        if is_relay and not e.is_exhibition:
+            key = (e.team_id, e.event_code)
+            team_relay_counts[key] = team_relay_counts.get(key, 0) + 1
+
+    for (tid, ev_code), count in team_relay_counts.items():
+        if count > 2:
+            t_code = team_code_map.get(tid, f"Team #{tid}")
+            notices.append(
+                f"Team {t_code} has {count} relays entered in {format_event_label(ev_code)}: "
+                "all 3 entries are seeded, and only the fastest 2 non-DQ relays will score points."
+            )
+
+    return notices
 
 
 def assign_center_out_lanes(
