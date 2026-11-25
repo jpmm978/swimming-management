@@ -133,16 +133,53 @@ def render_meet_center_view(
             for r in session.scalars(select(OfficialResult).where(OfficialResult.meet_id == selected_meet.id)).all()
         }
 
-    # Map each team_id to its active season roster athletes
     athlete_ids_by_team: dict[int, set[int]] = {}
     for sr in season_rosters:
         athlete_ids_by_team.setdefault(sr.team_id, set()).add(sr.athlete_id)
+
+    lane_overrides: dict[int, int] = st.session_state.setdefault(
+        f"lane_overrides_meet_{selected_meet.id}", {}
+    )
+
+    # Track swimmer relay assignments from DB attributes or session state
+    swimmer_relays_map: dict[int, set[str]] = {}
+    for e in db_entries:
+        spec = EVENT_BY_CODE.get(e.event_code)
+        is_relay = spec.is_relay if spec else e.is_relay
+        if is_relay:
+            member_ids = getattr(e, "relay_member_ids", None) or []
+            for mid in member_ids:
+                swimmer_relays_map.setdefault(mid, set()).add(e.event_code)
+
+    session_relay_links: dict[int, set[str]] = st.session_state.setdefault(
+        f"swimmer_relays_meet_{selected_meet.id}", {}
+    )
+    for aid, ev_codes in session_relay_links.items():
+        swimmer_relays_map.setdefault(aid, set()).update(ev_codes)
 
     candidates: list[EntryCandidate] = []
     for e in db_entries:
         t = team_map.get(e.team_id)
         a = athlete_map.get(e.athlete_id) if e.athlete_id else None
         spec = EVENT_BY_CODE.get(e.event_code)
+        is_relay = spec.is_relay if spec else e.is_relay
+        relay_members = list(getattr(e, "relay_member_ids", None) or [])
+        if is_relay:
+            for aid, ev_codes in swimmer_relays_map.items():
+                if e.event_code in ev_codes and aid not in relay_members:
+                    relay_members.append(aid)
+
+        relay_names = [
+            f"{athlete_map[mid].first_name} {athlete_map[mid].last_name}"
+            for mid in relay_members
+            if mid in athlete_map
+        ]
+        relay_label = (
+            f"{t.code if t else 'Team'} Relay ({', '.join(relay_names)})"
+            if relay_names
+            else f"{t.code if t else 'Team'} Relay"
+        )
+
         candidates.append(
             EntryCandidate(
                 entry_id=e.id,
@@ -150,8 +187,10 @@ def render_meet_center_view(
                 team_code=t.code if t else "TEAM",
                 event_code=e.event_code,
                 athlete_id=e.athlete_id,
-                athlete_name=f"{a.first_name} {a.last_name}" if a else f"{t.code if t else 'Team'} Relay",
-                is_relay=spec.is_relay if spec else e.is_relay,
+                athlete_name=f"{a.first_name} {a.last_name}" if a else relay_label,
+                relay_label=relay_label,
+                relay_member_ids=relay_members,
+                is_relay=is_relay,
                 is_exhibition=e.is_exhibition,
                 seed_time_ms=e.seed_time_ms,
             )
@@ -159,7 +198,7 @@ def render_meet_center_view(
 
     with tab_entries:
         if active_user and not selected_meet.is_locked and teams:
-            with st.expander("SwimTopia-Style Individual Event Checkboxes", expanded=True):
+            with st.expander("SwimTopia-Style Swimmer Event Checkboxes (Individual & Relays)", expanded=True):
                 sw_c1, sw_c2, sw_c3 = st.columns([1.3, 1.7, 1.0])
                 matrix_team = sw_c1.selectbox(
                     "Entry Team",
@@ -185,64 +224,84 @@ def render_meet_center_view(
                     )
                     matrix_exh = sw_c3.checkbox("Exhibition Swimmer", value=False, key="matrix_entry_exh")
 
-                    existing_for_swimmer = [
-                        e for e in db_entries if e.athlete_id == matrix_athlete.id
+                    existing_indiv_entries = [
+                        e for e in db_entries if e.athlete_id == matrix_athlete.id and not e.is_relay
                     ]
-                    existing_event_codes = {e.event_code for e in existing_for_swimmer}
+                    existing_indiv_codes = {e.event_code for e in existing_indiv_entries}
+                    existing_relay_codes = swimmer_relays_map.get(matrix_athlete.id, set())
+
+                    def _gender_matches(ev_gender: str) -> bool:
+                        if matrix_athlete.gender is None or matrix_athlete.gender == "X":
+                            return True
+                        if matrix_athlete.gender == "M":
+                            return ev_gender == "B"
+                        if matrix_athlete.gender == "F":
+                            return ev_gender == "G"
+                        return True
 
                     indiv_events = [
-                        ev
-                        for ev in MIAA_STANDARD_EVENTS
-                        if not ev.is_relay
-                        and (
-                            matrix_athlete.gender is None
-                            or (matrix_athlete.gender == "M" and ev.gender == "B")
-                            or (matrix_athlete.gender == "F" and ev.gender == "G")
-                            or matrix_athlete.gender == "X"
-                        )
+                        ev for ev in MIAA_STANDARD_EVENTS if not ev.is_relay and _gender_matches(ev.gender)
+                    ]
+                    relay_events = [
+                        ev for ev in MIAA_STANDARD_EVENTS if ev.is_relay and _gender_matches(ev.gender)
                     ]
 
                     selected_event_seeds: dict[str, str] = {}
-                    checked_events: list[str] = []
+                    checked_indiv_events: list[str] = []
+                    checked_relay_events: list[str] = []
 
-                    st.markdown("**Check events to enter (NFHS limit: max 2 individual / 4 total events per meet):**")
+                    st.markdown("**Individual Events (max 2 individual / 4 total NFHS events):**")
                     for ev in indiv_events:
                         r_cols = st.columns([2.4, 1.2, 0.8])
-                        already_in = ev.code in existing_event_codes
+                        already_in = ev.code in existing_indiv_codes
                         is_checked = r_cols[0].checkbox(
                             f"#{ev.event_number} · {ev.name}" + (" *(already entered)*" if already_in else ""),
                             value=False,
                             disabled=already_in,
-                            key=f"chk_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
+                            key=f"chk_ind_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
                         )
                         seed_val = r_cols[1].text_input(
                             f"Seed for {ev.code}",
                             value="NT",
                             disabled=not is_checked,
-                            key=f"seed_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
+                            key=f"seed_ind_{selected_meet.id}_{matrix_athlete.id}_{ev.code}",
                             label_visibility="collapsed",
                         )
                         r_cols[2].caption("Diving" if ev.is_diving else "Swim")
                         if is_checked and not already_in:
-                            checked_events.append(ev.code)
+                            checked_indiv_events.append(ev.code)
                             selected_event_seeds[ev.code] = seed_val
 
-                    projected_indiv = len([e for e in existing_for_swimmer if not e.is_relay]) + len(checked_events)
-                    projected_total = len(existing_for_swimmer) + len(checked_events)
+                    st.markdown("**Relay Events (check to enter swimmer in relay):**")
+                    for rev in relay_events:
+                        rel_cols = st.columns([3.2, 1.0])
+                        already_in_relay = rev.code in existing_relay_codes
+                        is_rel_checked = rel_cols[0].checkbox(
+                            f"#{rev.event_number} · {rev.name}" + (" *(assigned)*" if already_in_relay else ""),
+                            value=already_in_relay,
+                            key=f"chk_rel_{selected_meet.id}_{matrix_athlete.id}_{rev.code}",
+                        )
+                        rel_cols[1].caption("Relay")
+                        if is_rel_checked and not already_in_relay:
+                            checked_relay_events.append(rev.code)
+
+                    projected_indiv = len(existing_indiv_codes) + len(checked_indiv_events)
+                    projected_relays = len(existing_relay_codes) + len(checked_relay_events)
+                    projected_total = projected_indiv + projected_relays
 
                     st.caption(
                         f"Swimmer Event Load after save: **{projected_indiv}/2 Individual** · "
-                        f"**{projected_total}/4 Total Events**"
+                        f"**{projected_relays} Relay(s)** · **{projected_total}/4 Total Events**"
                     )
                     if projected_indiv > 2 or projected_total > 4:
                         st.warning("Heads up: This selection exceeds standard NFHS per-swimmer entry limits.")
 
                     if st.button("Save Checked Events for Swimmer", type="primary", key="save_checkbox_entries"):
-                        if not checked_events:
-                            st.info("Check at least one event above before saving.")
+                        if not checked_indiv_events and not checked_relay_events:
+                            st.info("Check at least one individual or relay event above before saving.")
                         else:
                             with repo.session() as session:
-                                for ev_code in checked_events:
+                                for ev_code in checked_indiv_events:
                                     ev_spec = EVENT_BY_CODE[ev_code]
                                     session.add(
                                         Entry(
@@ -259,47 +318,44 @@ def render_meet_center_view(
                                             ),
                                         )
                                     )
+
+                                for rel_code in checked_relay_events:
+                                    relay_entry = session.scalar(
+                                        select(Entry).where(
+                                            Entry.meet_id == selected_meet.id,
+                                            Entry.team_id == matrix_team.id,
+                                            Entry.event_code == rel_code,
+                                            Entry.is_relay.is_(True),
+                                        )
+                                    )
+                                    if relay_entry is None:
+                                        relay_entry = Entry(
+                                            meet_id=selected_meet.id,
+                                            team_id=matrix_team.id,
+                                            athlete_id=None,
+                                            event_code=rel_code,
+                                            is_relay=True,
+                                            is_exhibition=matrix_exh,
+                                            seed_time_ms=None,
+                                        )
+                                        session.add(relay_entry)
+                                        session.flush()
+                                    if hasattr(relay_entry, "relay_member_ids"):
+                                        current_members = list(relay_entry.relay_member_ids or [])
+                                        if matrix_athlete.id not in current_members:
+                                            current_members.append(matrix_athlete.id)
+                                            relay_entry.relay_member_ids = current_members
+
                                 session.commit()
+
+                            athlete_relays = session_relay_links.setdefault(matrix_athlete.id, set())
+                            athlete_relays.update(checked_relay_events)
                             st.success(
-                                f"Added {len(checked_events)} event entry/entries for "
+                                f"Saved {len(checked_indiv_events)} individual event(s) and "
+                                f"{len(checked_relay_events)} relay assignment(s) for "
                                 f"{matrix_athlete.first_name} {matrix_athlete.last_name}."
                             )
                             st.rerun()
-
-            with st.expander("Add Relay Team Entry", expanded=False):
-                with st.form("add_relay_entry_form"):
-                    rc1, rc2, rc3, rc4 = st.columns([1.3, 1.8, 1.1, 0.8])
-                    relay_team = rc1.selectbox(
-                        "Team",
-                        options=teams,
-                        index=teams.index(selected_team) if selected_team in teams else 0,
-                        format_func=lambda t: f"{t.name} ({t.code})",
-                        key="relay_entry_team",
-                    )
-                    relay_ev = rc2.selectbox(
-                        "Relay Event",
-                        options=[ev for ev in MIAA_STANDARD_EVENTS if ev.is_relay],
-                        format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
-                        key="relay_entry_event",
-                    )
-                    relay_seed = rc3.text_input("Seed Time", value="NT", key="relay_entry_seed")
-                    relay_exh = rc4.checkbox("Exhibition", value=False, key="relay_entry_exh")
-
-                    if st.form_submit_button("Add Relay Entry", type="primary"):
-                        with repo.session() as session:
-                            session.add(
-                                Entry(
-                                    meet_id=selected_meet.id,
-                                    team_id=relay_team.id,
-                                    athlete_id=None,
-                                    event_code=relay_ev.code,
-                                    is_relay=True,
-                                    is_exhibition=relay_exh,
-                                    seed_time_ms=parse_time_to_ms(relay_seed),
-                                )
-                            )
-                            session.commit()
-                        st.rerun()
 
         violations = validate_nfhs_entries(candidates)
         if violations:
@@ -317,8 +373,55 @@ def render_meet_center_view(
         )
         ev_entries = [c for c in candidates if c.event_code == ev_filter.code]
         seeded = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
+
+        # Apply any custom lane edits
+        db_lane_by_entry = {
+            e.id: getattr(e, "lane_number", None)
+            for e in db_entries
+            if e.event_code == ev_filter.code
+        }
+        for row in seeded:
+            eid = row["entry_id"]
+            if eid in lane_overrides:
+                row["lane"] = lane_overrides[eid]
+            elif db_lane_by_entry.get(eid) is not None:
+                row["lane"] = db_lane_by_entry[eid]
+
         if seeded:
             st.dataframe(seeded, use_container_width=True, hide_index=True)
+
+            if active_user and not selected_meet.is_locked:
+                with st.expander("Edit Assigned Lane for Entry", expanded=False):
+                    le_cols = st.columns([2.4, 1.0, 1.2])
+                    target_row = le_cols[0].selectbox(
+                        "Assigned Swimmer / Relay",
+                        options=seeded,
+                        format_func=lambda r: (
+                            f"Heat {r['heat']} · Lane {r['lane']} — "
+                            f"{r['team_code']} {r['athlete_name']} ({r['seed_time']})"
+                        ),
+                        key=f"edit_lane_entry_{selected_meet.id}_{ev_filter.code}",
+                    )
+                    new_lane = int(
+                        le_cols[1].number_input(
+                            "New Lane",
+                            min_value=1,
+                            max_value=selected_meet.lane_count,
+                            value=int(target_row["lane"]),
+                            key=f"edit_lane_num_{selected_meet.id}_{ev_filter.code}_{target_row['entry_id']}",
+                        )
+                    )
+                    le_cols[2].markdown("<br>", unsafe_allow_html=True)
+                    if le_cols[2].button("Update Lane", type="primary", key=f"save_lane_btn_{ev_filter.code}"):
+                        eid = int(target_row["entry_id"])
+                        lane_overrides[eid] = new_lane
+                        with repo.session() as session:
+                            db_entry = session.get(Entry, eid)
+                            if db_entry is not None and hasattr(db_entry, "lane_number"):
+                                db_entry.lane_number = new_lane
+                                session.commit()
+                        st.success(f"Updated {target_row['athlete_name']} to Lane {new_lane}.")
+                        st.rerun()
         else:
             st.info("No entries in this event yet.")
 
