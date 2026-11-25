@@ -474,20 +474,20 @@ def render_meet_program_html(
 <meta charset="utf-8">
 <title>{html.escape(meet_name)} — Meet Program</title>
 <style>
-  @page {{ size: letter landscape; margin: 0.35in; }}
-  body {{ font-family: Arial, Helvetica, sans-serif; font-size: 9px; color: #0f172a; margin: 0; }}
-  .top-bar {{ display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 4px; margin-bottom: 8px; font-size: 10px; }}
-  .meet-hdr {{ text-align: center; font-size: 13px; font-weight: bold; margin-bottom: 8px; }}
-  .grid {{ column-count: 3; column-gap: 14px; }}
-  .ev-block {{ break-inside: avoid; margin-bottom: 10px; }}
-  .ev-title {{ font-weight: bold; font-size: 9.5px; background: #e2e8f0; padding: 2px 4px; border-top: 1px solid #334155; border-bottom: 1px solid #334155; }}
-  .ev-table {{ width: 100%; border-collapse: collapse; margin-bottom: 3px; }}
-  .heat-hdr td {{ font-weight: bold; font-size: 8.5px; background: #f8fafc; padding: 2px 4px; border-bottom: 1px solid #cbd5e1; }}
-  .col-hdr th {{ font-size: 8px; text-align: left; padding: 1px 3px; border-bottom: 1px solid #94a3b8; color: #334155; }}
-  td {{ padding: 1.5px 3px; border-bottom: 1px dotted #cbd5e1; vertical-align: top; }}
-  .lane-c {{ width: 24px; text-align: center; font-weight: bold; }}
-  .time-c {{ text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
-  .relay-legs {{ font-size: 7.5px; color: #475569; line-height: 1.25; }}
+  @page { size: letter portrait; margin: 0.4in; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 9.5px; color: #0f172a; margin: 0; }
+  .top-bar { display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 4px; margin-bottom: 8px; font-size: 10.5px; }
+  .meet-hdr { text-align: center; font-size: 13.5px; font-weight: bold; margin-bottom: 10px; }
+  .grid { column-count: 2; column-gap: 18px; }
+  .ev-block { break-inside: avoid; margin-bottom: 11px; }
+  .ev-title { font-weight: bold; font-size: 10px; background: #e2e8f0; padding: 3px 5px; border-top: 1px solid #334155; border-bottom: 1px solid #334155; }
+  .ev-table { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
+  .heat-hdr td { font-weight: bold; font-size: 9px; background: #f8fafc; padding: 2px 4px; border-bottom: 1px solid #cbd5e1; }
+  .col-hdr th { font-size: 8.5px; text-align: left; padding: 2px 4px; border-bottom: 1px solid #94a3b8; color: #334155; }
+  td { padding: 2px 4px; border-bottom: 1px dotted #cbd5e1; vertical-align: top; }
+  .lane-c { width: 26px; text-align: center; font-weight: bold; }
+  .time-c { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .relay-legs { font-size: 8px; color: #475569; line-height: 1.3; margin-top: 1px; }
 </style>
 </head>
 <body>
