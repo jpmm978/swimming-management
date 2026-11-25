@@ -271,6 +271,113 @@ def assign_center_out_lanes(
     return assignments
 
 
+def assign_dual_meet_odd_even_lanes(
+    entries: list[EntryCandidate],
+    *,
+    odd_team_id: int,
+    even_team_id: Optional[int] = None,
+    lane_count: int = 6,
+) -> list[dict]:
+    odd_lane_order_map = {
+        4: [3, 1],
+        6: [3, 1, 5],
+        8: [5, 3, 1, 7],
+    }
+    even_lane_order_map = {
+        4: [2, 4],
+        6: [4, 2, 6],
+        8: [4, 6, 2, 8],
+    }
+    odd_lanes = odd_lane_order_map.get(
+        lane_count, [l for l in range(1, lane_count + 1) if l % 2 == 1]
+    )
+    even_lanes = even_lane_order_map.get(
+        lane_count, [l for l in range(1, lane_count + 1) if l % 2 == 0]
+    )
+
+    if not entries:
+        return []
+
+    def _seed_sort_key(e: EntryCandidate) -> tuple[bool, int]:
+        return (
+            e.seed_time_ms is None,
+            e.seed_time_ms if e.seed_time_ms is not None else 999_999_999,
+        )
+
+    odd_entries = sorted(
+        [e for e in entries if e.team_id == odd_team_id],
+        key=_seed_sort_key,
+    )
+    if even_team_id is not None and even_team_id != odd_team_id:
+        even_entries = sorted(
+            [e for e in entries if e.team_id == even_team_id],
+            key=_seed_sort_key,
+        )
+        extra_entries = sorted(
+            [e for e in entries if e.team_id not in {odd_team_id, even_team_id}],
+            key=_seed_sort_key,
+        )
+    else:
+        even_entries = sorted(
+            [e for e in entries if e.team_id != odd_team_id],
+            key=_seed_sort_key,
+        )
+        extra_entries = []
+
+    odd_chunks = [
+        odd_entries[i : i + len(odd_lanes)] for i in range(0, len(odd_entries), len(odd_lanes))
+    ]
+    even_chunks = [
+        even_entries[i : i + len(even_lanes)] for i in range(0, len(even_entries), len(even_lanes))
+    ]
+    num_heats = max(len(odd_chunks), len(even_chunks), 1 if extra_entries else 0)
+
+    heats_fast_first: list[list[tuple[int, EntryCandidate]]] = []
+    for h_idx in range(num_heats):
+        heat_pairs: list[tuple[int, EntryCandidate]] = []
+        o_group = odd_chunks[h_idx] if h_idx < len(odd_chunks) else []
+        e_group = even_chunks[h_idx] if h_idx < len(even_chunks) else []
+
+        for pos, entry in enumerate(o_group):
+            heat_pairs.append((odd_lanes[pos], entry))
+        for pos, entry in enumerate(e_group):
+            heat_pairs.append((even_lanes[pos], entry))
+
+        heats_fast_first.append(heat_pairs)
+
+    if extra_entries:
+        all_lanes_center = [l for pair in zip(odd_lanes, even_lanes) for l in pair]
+        for entry in extra_entries:
+            placed = False
+            for heat_pairs in heats_fast_first:
+                used = {l for l, _ in heat_pairs}
+                avail = [l for l in all_lanes_center if l not in used]
+                if avail:
+                    heat_pairs.append((avail[0], entry))
+                    placed = True
+                    break
+            if not placed:
+                heats_fast_first.append([(all_lanes_center[0], entry)])
+
+    heats_ordered = list(reversed(heats_fast_first))
+
+    assignments: list[dict] = []
+    for heat_idx, heat_pairs in enumerate(heats_ordered, start=1):
+        for lane, entry in sorted(heat_pairs, key=lambda item: item[0]):
+            assignments.append(
+                {
+                    "heat": heat_idx,
+                    "lane": lane,
+                    "entry_id": entry.entry_id,
+                    "team_code": entry.team_code,
+                    "athlete_name": entry.athlete_name or entry.relay_label,
+                    "seed_time": format_time_ms(entry.seed_time_ms),
+                    "is_exhibition": entry.is_exhibition,
+                }
+            )
+    return assignments
+
+
 def score_event_performances(
     performances: list[PerformanceInput],
     *,
