@@ -62,6 +62,23 @@ def render_team_center_view(
         m3.metric("Pending Eligibility", len(roster) - eligible_count)
 
         if roster:
+            st.dataframe(
+                [
+                    {
+                        "First Name": r["first_name"],
+                        "Last Name": r["last_name"],
+                        "Preferred": r["preferred_name"] or "",
+                        "Grad Year": r["grad_year"] or "",
+                        "Gender": r["gender"] or "",
+                        "Eligibility Verified": r["eligibility_verified"],
+                    }
+                    for r in roster
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        
+        if roster:
             st.dataframe(roster, use_container_width=True, hide_index=True)
         else:
             st.info("No active athletes on this season roster yet.")
