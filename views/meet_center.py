@@ -791,6 +791,118 @@ def render_meet_center_view(
                 st.rerun()
 
     with tab_reports:
+        st.divider()
+        st.subheader("Pre-Meet & Pool-Deck Sheets (Check-In, Heat Sheet & Timer Sheets)")
+
+        checkin_roster: list[dict] = []
+        for sr in season_rosters:
+            ath = athlete_map.get(sr.athlete_id)
+            tm = team_map.get(sr.team_id)
+            if ath:
+                checkin_roster.append(
+                    {
+                        "athlete_id": ath.id,
+                        "team_code": tm.code if tm else "",
+                        "first_name": ath.first_name,
+                        "last_name": ath.last_name,
+                        "preferred_name": ath.preferred_name,
+                        "grad_year": ath.grad_year,
+                        "gender": ath.gender,
+                    }
+                )
+
+        db_entry_attrs = {
+            e.id: {
+                "heat_number": getattr(e, "heat_number", None),
+                "lane_number": getattr(e, "lane_number", None),
+                "is_exhibition": bool(e.is_exhibition),
+            }
+            for e in db_entries
+        }
+        athlete_grad_map = {a.id: a.grad_year for a in athletes}
+        athlete_name_map = {a.id: f"{a.first_name} {a.last_name}" for a in athletes}
+
+        rep_c1, rep_c2, rep_c3 = st.columns(3)
+
+        checkin_team_code = rep_c1.selectbox(
+            "Check-In Team Filter",
+            options=["All Teams"] + [t.code for t in teams],
+            key=f"checkin_team_filter_{selected_meet.id}",
+        )
+        active_checkin_filter = None if checkin_team_code == "All Teams" else checkin_team_code
+
+        rep_c1.download_button(
+            "Download Swimmer Check-In (HTML)",
+            data=render_swimmer_checkin_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                roster_rows=checkin_roster,
+                candidates=candidates,
+                team_code_filter=active_checkin_filter,
+            ),
+            file_name=f"meet_{selected_meet.id}_checkin.html",
+            mime="text/html",
+        )
+        rep_c1.download_button(
+            "Download Swimmer Check-In (CSV)",
+            data=render_swimmer_checkin_csv(
+                roster_rows=checkin_roster,
+                candidates=candidates,
+                team_code_filter=active_checkin_filter,
+            ),
+            file_name=f"meet_{selected_meet.id}_checkin.csv",
+            mime="text/csv",
+        )
+
+        rep_c2.markdown("**Meet Program (Heat Sheet)**")
+        rep_c2.caption("3-column heat sheet with heats, lanes, relay legs & seed times.")
+        rep_c2.download_button(
+            "Download Meet Program / Heat Sheet (HTML)",
+            data=render_meet_program_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                course_label=selected_meet.course.value,
+                lane_count=selected_meet.lane_count,
+                candidates=candidates,
+                athlete_grad_map=athlete_grad_map,
+                athlete_name_map=athlete_name_map,
+                heat_lane_overrides=heat_lane_overrides,
+                db_entry_attrs=db_entry_attrs,
+            ),
+            file_name=f"meet_{selected_meet.id}_program_heat_sheet.html",
+            mime="text/html",
+        )
+
+        timer_version_label = rep_c3.selectbox(
+            "Timer Sheet Version",
+            options=[
+                "By Lane (1 Sheet per Lane)",
+                "By Event & Heat (All Lanes)",
+                "Clipboard Fill-In (Compact)",
+            ],
+            key=f"timer_sheet_version_{selected_meet.id}",
+        )
+        timer_ver_key = (
+            "by_lane"
+            if timer_version_label.startswith("By Lane")
+            else "by_event"
+            if timer_version_label.startswith("By Event")
+            else "clipboard"
+        )
+        rep_c3.download_button(
+            "Download Timer Sheets (HTML)",
+            data=render_timer_sheets_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                lane_count=selected_meet.lane_count,
+                candidates=candidates,
+                version=timer_ver_key,
+                heat_lane_overrides=heat_lane_overrides,
+                db_entry_attrs=db_entry_attrs,
+            ),
+            file_name=f"meet_{selected_meet.id}_timer_sheets_{timer_ver_key}.html",
+            mime="text/html",
+        )
         all_scored: list[ScoredPerformance] = []
         boys_totals: dict[str, Decimal] = {}
         girls_totals: dict[str, Decimal] = {}
