@@ -310,11 +310,3 @@ def score_event_performances(
         )
 
     return results
-```[cite: 21]
-
-### How Plain Digits Map
-* `2415` → `24.15` seconds (`24,150` ms)
-* `10240` → `1:02.40` (`62,400` ms)
-* `24.15` or `1:02.40` → continues to work identically
-
-Paste this into `core_logic/meet_engine.py`, commit to `main`, and let Streamlit Cloud reload. Would you like to test digit entry on a seed time or pool-deck result next?
