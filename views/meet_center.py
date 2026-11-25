@@ -148,7 +148,6 @@ def render_meet_center_view(
     for sr in season_rosters:
         athlete_ids_by_team.setdefault(sr.team_id, set()).add(sr.athlete_id)
 
-    # Reconstruct saved relay squad letter (A/B/C/D) & 4 legs per Entry ID
     relay_meta_by_entry: dict[int, dict] = {}
     for log in relay_audit_logs:
         if log.entity_id and log.entity_id.isdigit():
@@ -160,8 +159,8 @@ def render_meet_center_view(
                     "member_ids": details.get("member_ids", []),
                 }
 
-    lane_overrides: dict[int, int] = st.session_state.setdefault(
-        f"lane_overrides_meet_{selected_meet.id}", {}
+    heat_lane_overrides: dict[int, dict[str, int]] = st.session_state.setdefault(
+        f"heat_lane_overrides_meet_{selected_meet.id}", {}
     )
 
     auto_squad_counter: dict[tuple[int, str], int] = {}
@@ -432,7 +431,7 @@ def render_meet_center_view(
                     def _fmt_leg_swimmer(a: Athlete | None) -> str:
                         if a is None:
                             return "-- Select Swimmer --"
-                        ind_c, tot_c = _athlete_event_counts(a.id)
+                        _, tot_c = _athlete_event_counts(a.id)
                         return f"{a.last_name}, {a.first_name} ({tot_c}/4 events)"
 
                     leg_cols = st.columns(4)
@@ -521,7 +520,7 @@ def render_meet_center_view(
             st.success(f"All {len(candidates)} entries pass NFHS dual-meet limits.")
 
         ev_filter = st.selectbox(
-            "Preview Heat & Lane Seeding for Event",
+            "Preview Heats & Lane Seeding for Event",
             options=MIAA_STANDARD_EVENTS,
             format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
             key="seed_preview_event",
@@ -529,52 +528,104 @@ def render_meet_center_view(
         ev_entries = [c for c in candidates if c.event_code == ev_filter.code]
         seeded = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
 
-        db_lane_by_entry = {
-            e.id: getattr(e, "lane_number", None)
-            for e in db_entries
-            if e.event_code == ev_filter.code
-        }
+        db_entry_by_id = {e.id: e for e in db_entries if e.event_code == ev_filter.code}
         for row in seeded:
-            eid = row["entry_id"]
-            if eid in lane_overrides:
-                row["lane"] = lane_overrides[eid]
-            elif db_lane_by_entry.get(eid) is not None:
-                row["lane"] = db_lane_by_entry[eid]
+            eid = int(row["entry_id"])
+            db_e = db_entry_by_id.get(eid)
+            ov = heat_lane_overrides.get(eid, {})
+            if "heat" in ov:
+                row["heat"] = ov["heat"]
+            elif db_e is not None and getattr(db_e, "heat_number", None) is not None:
+                row["heat"] = db_e.heat_number
+
+            if "lane" in ov:
+                row["lane"] = ov["lane"]
+            elif db_e is not None and getattr(db_e, "lane_number", None) is not None:
+                row["lane"] = db_e.lane_number
+
+            if db_e is not None:
+                row["is_exhibition"] = bool(db_e.is_exhibition)
+
+        seeded.sort(key=lambda r: (int(r["heat"]), int(r["lane"])))
 
         if seeded:
+            heat_numbers = sorted({int(r["heat"]) for r in seeded})
+            st.caption(f"Total Heats in Event: **{len(heat_numbers)}** ({', '.join(f'Heat {h}' for h in heat_numbers)})")
             st.dataframe(seeded, use_container_width=True, hide_index=True)
 
             if active_user and not selected_meet.is_locked:
-                with st.expander("Edit Assigned Lane for Entry", expanded=False):
-                    le_cols = st.columns([2.4, 1.0, 1.2])
-                    target_row = le_cols[0].selectbox(
-                        "Assigned Swimmer / Relay",
+                with st.expander("Edit Saved Entry (Exhibition EXH, Heat, Lane & Seed Time)", expanded=False):
+                    target_row = st.selectbox(
+                        "Select Saved Entry in Event",
                         options=seeded,
                         format_func=lambda r: (
                             f"Heat {r['heat']} · Lane {r['lane']} — "
-                            f"{r['team_code']} {r['athlete_name']} ({r['seed_time']})"
+                            f"{r['team_code']} {r['athlete_name']} "
+                            f"({'EXH · ' if r['is_exhibition'] else ''}Seed: {r['seed_time']})"
                         ),
-                        key=f"edit_lane_entry_{selected_meet.id}_{ev_filter.code}",
+                        key=f"edit_entry_sel_{selected_meet.id}_{ev_filter.code}",
+                    )
+                    eid = int(target_row["entry_id"])
+                    db_target = db_entry_by_id.get(eid)
+
+                    ed1, ed2, ed3, ed4 = st.columns([1.0, 1.0, 1.2, 1.0])
+                    new_heat = int(
+                        ed1.number_input(
+                            "Heat",
+                            min_value=1,
+                            max_value=12,
+                            value=int(target_row["heat"]),
+                            key=f"edit_heat_{selected_meet.id}_{ev_filter.code}_{eid}",
+                        )
                     )
                     new_lane = int(
-                        le_cols[1].number_input(
-                            "New Lane",
+                        ed2.number_input(
+                            "Lane",
                             min_value=1,
                             max_value=selected_meet.lane_count,
                             value=int(target_row["lane"]),
-                            key=f"edit_lane_num_{selected_meet.id}_{ev_filter.code}_{target_row['entry_id']}",
+                            key=f"edit_lane_{selected_meet.id}_{ev_filter.code}_{eid}",
                         )
                     )
-                    le_cols[2].markdown("<br>", unsafe_allow_html=True)
-                    if le_cols[2].button("Update Lane", type="primary", key=f"save_lane_btn_{ev_filter.code}"):
-                        eid = int(target_row["entry_id"])
-                        lane_overrides[eid] = new_lane
+                    default_seed_str = (
+                        ""
+                        if ev_filter.is_diving
+                        else (
+                            format_time_ms(db_target.seed_time_ms)
+                            if (db_target and db_target.seed_time_ms)
+                            else "NT"
+                        )
+                    )
+                    new_seed_str = ed3.text_input(
+                        "Seed Time",
+                        value=default_seed_str,
+                        disabled=ev_filter.is_diving,
+                        key=f"edit_seed_{selected_meet.id}_{ev_filter.code}_{eid}",
+                    )
+                    new_exh = ed4.checkbox(
+                        "Exhibition (EXH)",
+                        value=bool(target_row["is_exhibition"]),
+                        key=f"edit_exh_{selected_meet.id}_{ev_filter.code}_{eid}",
+                    )
+
+                    if st.button("Save Entry Changes", type="primary", key=f"save_entry_edits_{ev_filter.code}_{eid}"):
+                        heat_lane_overrides[eid] = {"heat": new_heat, "lane": new_lane}
                         with repo.session() as session:
                             db_entry = session.get(Entry, eid)
-                            if db_entry is not None and hasattr(db_entry, "lane_number"):
-                                db_entry.lane_number = new_lane
+                            if db_entry is not None:
+                                db_entry.is_exhibition = new_exh
+                                if not ev_filter.is_diving:
+                                    db_entry.seed_time_ms = parse_time_to_ms(new_seed_str)
+                                if hasattr(db_entry, "heat_number"):
+                                    db_entry.heat_number = new_heat
+                                if hasattr(db_entry, "lane_number"):
+                                    db_entry.lane_number = new_lane
                                 session.commit()
-                        st.success(f"Updated {target_row['athlete_name']} to Lane {new_lane}.")
+                        st.success(
+                            f"Updated {target_row['athlete_name']} — "
+                            f"Heat {new_heat}, Lane {new_lane}, "
+                            f"{'EXH' if new_exh else 'Scoring'}."
+                        )
                         st.rerun()
         else:
             st.info("No entries in this event yet.")
