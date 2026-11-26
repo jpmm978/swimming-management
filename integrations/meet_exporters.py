@@ -218,7 +218,7 @@ def _build_seeded_event_map(
         else:
             rows = assign_center_out_lanes(ev_entries, lane_count=lane_count)
 
-        for row in seeded:
+        for row in rows:
             eid = int(row["entry_id"])
             ov = overrides.get(eid, {})
             attrs = db_attrs.get(eid, {})
