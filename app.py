@@ -217,10 +217,10 @@ def render_dashboard(
 
     with right_col:
         st.subheader("Quick Actions")
-        if st.button("Open Meet Center", use_container_width=True, type="primary"):
+        if st.button("Open Meet Center", width="stretch", type="primary"):
             st.session_state["active_center"] = "Meet Center"
             st.rerun()
-        if st.button("Manage Roster in Team Center", use_container_width=True):
+        if st.button("Manage Roster in Team Center", width="stretch"):
             st.session_state["active_center"] = "Team Center"
             st.rerun()
         if active_user:
@@ -248,7 +248,7 @@ def render_admin_center(repo: SwimRepository, selected_org: Organization | None)
     ]
     st.subheader("Recent Audit Log")
     if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     else:
         st.info("No audit records found.")
 
@@ -273,6 +273,9 @@ def main() -> None:
     users: list[User] = ctx["users"]
     user_role_map: dict[int, list[RoleCode]] = ctx["user_role_map"]
 
+    if "active_center" not in st.session_state:
+        st.session_state["active_center"] = "Dashboard"
+
     with st.sidebar:
         st.markdown("### SWIM MANAGEMENT")
         user_options = {u.id: f"{u.display_name} ({u.email})" for u in users}
@@ -282,45 +285,9 @@ def main() -> None:
             options=list(user_options.keys()) if user_options else [None],
             format_func=lambda uid: user_options.get(uid, "Guest Spectator"),
             index=0 if default_user_id else 0,
+            key="sidebar_active_user_id",
         )
         active_user = next((u for u in users if u.id == active_user_id), None)
-
-        st.markdown("**WORKSPACE**")
-        if "active_center" not in st.session_state:
-            st.session_state["active_center"] = "Dashboard"
-
-        selected_org_id = st.session_state.get("selected_org_id", orgs[0].id if orgs else None)
-        selected_team_id = st.session_state.get("selected_team_id", teams[0].id if teams else None)
-        selected_season_id = st.session_state.get("selected_season_id", seasons[0].id if seasons else None)
-
-        with repo.session() as session:
-            active_roles = repo.get_user_roles(
-                session,
-                active_user.id if active_user else None,
-                org_id=selected_org_id,
-                team_id=selected_team_id,
-                season_id=selected_season_id,
-            )
-
-        allowed_centers = get_allowed_centers(active_roles)
-        if st.session_state["active_center"] not in allowed_centers:
-            st.session_state["active_center"] = allowed_centers[0]
-
-        for center_name, _ in NAV_CENTERS:
-            if center_name in allowed_centers:
-                is_current = st.session_state["active_center"] == center_name
-                if st.button(
-                    center_name,
-                    key=f"nav_{center_name}",
-                    use_container_width=True,
-                    type="primary" if is_current else "secondary",
-                ):
-                    st.session_state["active_center"] = center_name
-                    st.rerun()
-
-        if active_user and active_user.id in user_role_map:
-            role_labels = ", ".join(r.value for r in user_role_map[active_user.id]) or "spectator"
-            st.caption(f"Roles: `{role_labels}`")
 
     c_org, c_team, c_season, c_meet = st.columns([1.4, 1.3, 1.0, 1.5])
 
@@ -332,6 +299,7 @@ def main() -> None:
                 options=orgs,
                 index=orgs.index(selected_org) if selected_org in orgs else 0,
                 format_func=lambda o: o.name,
+                key="top_org_select",
             )
             st.session_state["selected_org_id"] = org_choice.id
             selected_org = org_choice
@@ -345,6 +313,7 @@ def main() -> None:
                 options=org_teams,
                 index=org_teams.index(selected_team) if selected_team in org_teams else 0,
                 format_func=lambda t: f"{t.name} ({t.code})",
+                key="top_team_select",
             )
             st.session_state["selected_team_id"] = team_choice.id
             selected_team = team_choice
@@ -358,6 +327,7 @@ def main() -> None:
                 options=org_seasons,
                 index=org_seasons.index(selected_season) if selected_season in org_seasons else 0,
                 format_func=lambda s: s.label,
+                key="top_season_select",
             )
             st.session_state["selected_season_id"] = season_choice.id
             selected_season = season_choice
@@ -372,9 +342,49 @@ def main() -> None:
             options=meet_options,
             index=current_idx,
             format_func=lambda m: "None selected" if m is None else f"{m.name} ({m.meet_date})",
+            key="top_meet_select",
         )
         st.session_state["selected_meet_id"] = meet_choice.id if meet_choice else None
         selected_meet = meet_choice
+
+    with repo.session() as session:
+        org_roles = repo.get_user_roles(
+            session,
+            active_user.id if active_user else None,
+            org_id=selected_org.id if selected_org else None,
+            team_id=None,
+            season_id=selected_season.id if selected_season else None,
+        )
+        team_roles = repo.get_user_roles(
+            session,
+            active_user.id if active_user else None,
+            org_id=selected_org.id if selected_org else None,
+            team_id=selected_team.id if selected_team else None,
+            season_id=selected_season.id if selected_season else None,
+        )
+        active_roles = set(org_roles) | set(team_roles) | set(user_role_map.get(active_user.id, []) if active_user else [])
+
+    allowed_centers = get_allowed_centers(active_roles)
+    if st.session_state["active_center"] not in allowed_centers:
+        st.session_state["active_center"] = allowed_centers[0]
+
+    with st.sidebar:
+        st.markdown("**WORKSPACE**")
+        for center_name, _ in NAV_CENTERS:
+            if center_name in allowed_centers:
+                is_current = st.session_state["active_center"] == center_name
+                if st.button(
+                    center_name,
+                    key=f"nav_{center_name}",
+                    width="stretch",
+                    type="primary" if is_current else "secondary",
+                ):
+                    st.session_state["active_center"] = center_name
+                    st.rerun()
+
+        if active_user and active_user.id in user_role_map:
+            role_labels = ", ".join(r.value for r in user_role_map[active_user.id]) or "spectator"
+            st.caption(f"Roles: `{role_labels}`")
 
     pending_count = len(outbox.list_items(statuses=("PENDING",)))
     sync_pill = f"Queue: {pending_count} pending" if pending_count else "DB & Outbox Ready"
