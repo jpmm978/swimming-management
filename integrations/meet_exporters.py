@@ -27,9 +27,11 @@ def export_meet_results_csv(scored_rows: list[ScoredPerformance]) -> str:
         "athlete_or_relay",
         "status",
         "is_exhibition",
+        "is_jd",
         "final_time",
         "diving_score",
         "points",
+        "decision_note",
     ]
     writer = csv.DictWriter(buf, fieldnames=fieldnames)
     writer.writeheader()
@@ -48,9 +50,11 @@ def export_meet_results_csv(scored_rows: list[ScoredPerformance]) -> str:
                 "athlete_or_relay": row.athlete_name,
                 "status": row.status,
                 "is_exhibition": row.is_exhibition,
+                "is_jd": row.is_jd,
                 "final_time": result_str,
                 "diving_score": str(row.diving_score) if row.diving_score is not None else "",
                 "points": f"{row.points:.2f}",
+                "decision_note": row.decision_note,
             }
         )
     return buf.getvalue()
@@ -95,6 +99,8 @@ def render_printable_results_html(
     ) or "<li>No scored events recorded.</li>"
 
     rows_html = []
+    official_notes: list[str] = []
+
     for r in scored_rows:
         spec = EVENT_BY_CODE.get(r.event_code)
         ev_label = f"#{spec.event_number} {spec.name}" if spec else r.event_code
@@ -103,7 +109,20 @@ def render_printable_results_html(
             if (spec and spec.is_diving and r.diving_score is not None)
             else format_time_ms(r.final_time_ms)
         )
-        place_label = "EXH" if r.is_exhibition else (str(r.place) if r.place else "-")
+        if r.is_exhibition:
+            place_label = "EXH"
+        elif r.place:
+            place_label = f"{r.place} (JD)" if r.is_jd else str(r.place)
+        else:
+            place_label = "-"
+
+        if r.decision_note:
+            official_notes.append(
+                f"<li><strong>{html.escape(ev_label)}</strong> — "
+                f"{html.escape(r.team_code)} {html.escape(r.athlete_name)}: "
+                f"{html.escape(r.decision_note)}</li>"
+            )
+
         rows_html.append(
             "<tr>"
             f"<td>{html.escape(ev_label)}</td>"
@@ -113,10 +132,18 @@ def render_printable_results_html(
             f"<td>{html.escape(mark)}</td>"
             f"<td>{html.escape(r.status)}</td>"
             f"<td>{r.points:.2f}</td>"
+            f"<td>{html.escape(r.decision_note)}</td>"
             "</tr>"
         )
 
-    body_rows = "\n".join(rows_html) or "<tr><td colspan='7'>No results recorded yet.</td></tr>"
+    body_rows = "\n".join(rows_html) or "<tr><td colspan='8'>No results recorded yet.</td></tr>"
+    notes_block = (
+        "<div class='notes-box'><strong>Official Tie &amp; Judge's Decision (JD) Notes:</strong>"
+        f"<ul>{''.join(official_notes)}</ul></div>"
+        if official_notes
+        else ""
+    )
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,9 +156,11 @@ def render_printable_results_html(
   .meta {{ font-size: 11px; color: #444; margin-bottom: 10px; }}
   .scores {{ display: flex; gap: 20px; margin-bottom: 12px; padding: 8px; background: #f5f7fa; border: 1px solid #cbd5e1; }}
   .scores ul {{ list-style: none; padding: 0; margin: 0; display: flex; gap: 18px; }}
-  table {{ width: 100%; border-collapse: collapse; margin-bottom: 16px; }}
-  th, td {{ border: 1px solid #cbd5e1; padding: 4px 6px; text-align: left; font-size: 10.5px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
+  th, td {{ border: 1px solid #cbd5e1; padding: 4px 6px; text-align: left; font-size: 10px; }}
   th {{ background: #e2e8f0; }}
+  .notes-box {{ margin-bottom: 14px; padding: 8px; background: #fffbeb; border: 1px solid #f59e0b; font-size: 10px; }}
+  .notes-box ul {{ margin: 4px 0 0 18px; padding: 0; }}
   .signoff {{ margin-top: 18px; display: flex; justify-content: space-between; gap: 24px; }}
   .sig-line {{ flex: 1; border-top: 1px solid #111; padding-top: 4px; font-size: 10px; }}
 </style>
@@ -143,13 +172,14 @@ def render_printable_results_html(
   <table>
     <thead>
       <tr>
-        <th>Event</th><th>Place</th><th>Team</th><th>Swimmer / Relay</th><th>Time / Score</th><th>Status</th><th>Pts</th>
+        <th>Event</th><th>Place</th><th>Team</th><th>Swimmer / Relay</th><th>Time / Score</th><th>Status</th><th>Pts</th><th>Official Notes</th>
       </tr>
     </thead>
     <tbody>
       {body_rows}
     </tbody>
   </table>
+  {notes_block}
   <div class="signoff">
     <div class="sig-line">Referee Signature / Date</div>
     <div class="sig-line">Scoring / Meet Director Signature / Date</div>
@@ -179,14 +209,14 @@ def _build_seeded_event_map(
             continue
 
         if seeding_mode == "Dual-Meet Odd / Even Lanes" and odd_team_id is not None:
-            seeded = assign_dual_meet_odd_even_lanes(
+            rows = assign_dual_meet_odd_even_lanes(
                 ev_entries,
                 odd_team_id=odd_team_id,
                 even_team_id=even_team_id,
                 lane_count=lane_count,
             )
         else:
-            seeded = assign_center_out_lanes(ev_entries, lane_count=lane_count)
+            rows = assign_center_out_lanes(ev_entries, lane_count=lane_count)
 
         for row in seeded:
             eid = int(row["entry_id"])
@@ -205,8 +235,8 @@ def _build_seeded_event_map(
             if "is_exhibition" in attrs:
                 row["is_exhibition"] = bool(attrs["is_exhibition"])
 
-        seeded.sort(key=lambda r: (int(r["heat"]), int(r["lane"])))
-        event_map[ev.code] = seeded
+        rows.sort(key=lambda r: (int(r["heat"]), int(r["lane"])))
+        event_map[ev.code] = rows
 
     return event_map
 
@@ -615,7 +645,6 @@ def render_timer_sheets_html(
         )
 
     else:
-        # Compact / Clip-Board Fill-In version
         compact_rows: list[str] = []
         for ev in MIAA_STANDARD_EVENTS:
             for row in event_seeded.get(ev.code, []):
