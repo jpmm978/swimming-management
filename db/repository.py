@@ -145,10 +145,11 @@ class SwimRepository:
                 continue
             if ra.org_id is not None and org_id is not None and ra.org_id != org_id:
                 continue
-            if ra.team_id is not None and team_id is not None and ra.team_id != team_id:
-                continue
-            if ra.season_id is not None and season_id is not None and ra.season_id != season_id:
-                continue
+            if ra.role not in ADMIN_ROLES:
+                if ra.team_id is not None and team_id is not None and ra.team_id != team_id:
+                    continue
+                if ra.season_id is not None and season_id is not None and ra.season_id != season_id:
+                    continue
             matched.add(ra.role)
 
         return matched
