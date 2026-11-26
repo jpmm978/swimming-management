@@ -40,7 +40,11 @@ from db.schema import (
 from integrations.meet_exporters import (
     export_hytek_sdif_results,
     export_meet_results_csv,
+    render_meet_program_html,
     render_printable_results_html,
+    render_swimmer_checkin_csv,
+    render_swimmer_checkin_html,
+    render_timer_sheets_html,
 )
 from views.deck_sync_bar import render_deck_sync_bar
 
@@ -235,6 +239,47 @@ def render_meet_center_view(
             elif c.is_relay and athlete_id in c.relay_member_ids:
                 relays += 1
         return indiv, indiv + relays
+
+    def _get_seeded_rows_for_event(
+        ev_code: str,
+        *,
+        seeding_mode: str = "Dual-Meet Odd / Even Lanes",
+        odd_team_id: int | None = None,
+        even_team_id: int | None = None,
+    ) -> list[dict]:
+        ev_entries = [c for c in candidates if c.event_code == ev_code]
+        if not ev_entries:
+            return []
+        if seeding_mode == "Dual-Meet Odd / Even Lanes" and odd_team_id is not None:
+            rows = assign_dual_meet_odd_even_lanes(
+                ev_entries,
+                odd_team_id=odd_team_id,
+                even_team_id=even_team_id,
+                lane_count=selected_meet.lane_count,
+            )
+        else:
+            rows = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
+
+        db_by_id = {e.id: e for e in db_entries if e.event_code == ev_code}
+        for r in rows:
+            eid = int(r["entry_id"])
+            db_e = db_by_id.get(eid)
+            ov = heat_lane_overrides.get(eid, {})
+            if "heat" in ov:
+                r["heat"] = ov["heat"]
+            elif db_e is not None and getattr(db_e, "heat_number", None) is not None:
+                r["heat"] = db_e.heat_number
+
+            if "lane" in ov:
+                r["lane"] = ov["lane"]
+            elif db_e is not None and getattr(db_e, "lane_number", None) is not None:
+                r["lane"] = db_e.lane_number
+
+            if db_e is not None:
+                r["is_exhibition"] = bool(db_e.is_exhibition)
+
+        rows.sort(key=lambda item: (int(item["heat"]), int(item["lane"])))
+        return rows
 
     with tab_entries:
         if active_user and not selected_meet.is_locked and teams:
@@ -559,36 +604,13 @@ def render_meet_center_view(
             format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
             key="seed_preview_event",
         )
-        ev_entries = [c for c in candidates if c.event_code == ev_filter.code]
-        if seeding_mode == "Dual-Meet Odd / Even Lanes":
-            seeded = assign_dual_meet_odd_even_lanes(
-                ev_entries,
-                odd_team_id=odd_team.id,
-                even_team_id=even_team.id,
-                lane_count=selected_meet.lane_count,
-            )
-        else:
-            seeded = assign_center_out_lanes(ev_entries, lane_count=selected_meet.lane_count)
-
+        seeded = _get_seeded_rows_for_event(
+            ev_filter.code,
+            seeding_mode=seeding_mode,
+            odd_team_id=odd_team.id,
+            even_team_id=even_team.id,
+        )
         db_entry_by_id = {e.id: e for e in db_entries if e.event_code == ev_filter.code}
-        for row in seeded:
-            eid = int(row["entry_id"])
-            db_e = db_entry_by_id.get(eid)
-            ov = heat_lane_overrides.get(eid, {})
-            if "heat" in ov:
-                row["heat"] = ov["heat"]
-            elif db_e is not None and getattr(db_e, "heat_number", None) is not None:
-                row["heat"] = db_e.heat_number
-
-            if "lane" in ov:
-                row["lane"] = ov["lane"]
-            elif db_e is not None and getattr(db_e, "lane_number", None) is not None:
-                row["lane"] = db_e.lane_number
-
-            if db_e is not None:
-                row["is_exhibition"] = bool(db_e.is_exhibition)
-
-        seeded.sort(key=lambda r: (int(r["heat"]), int(r["lane"])))
 
         if seeded:
             heat_numbers = sorted({int(r["heat"]) for r in seeded})
@@ -673,21 +695,95 @@ def render_meet_center_view(
             st.info("No entries in this event yet.")
 
     with tab_live:
-        active_ev = st.selectbox(
-            "Select Event to Score",
-            options=MIAA_STANDARD_EVENTS,
-            format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
-            key="live_score_event",
+        if "live_score_event" not in st.session_state:
+            st.session_state["live_score_event"] = MIAA_STANDARD_EVENTS[0]
+
+        current_ev_obj = st.session_state["live_score_event"]
+        current_ev_idx = next(
+            (i for i, ev in enumerate(MIAA_STANDARD_EVENTS) if ev.code == getattr(current_ev_obj, "code", None)),
+            0,
         )
-        ev_entries = [c for c in candidates if c.event_code == active_ev.code]
-        if not ev_entries:
+
+        nav_ev_col, prev_btn_col, next_btn_col, top_heat_col = st.columns([2.2, 0.55, 0.55, 1.5])
+        with prev_btn_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("◀ Prev", disabled=(current_ev_idx <= 0), key="live_prev_event_btn"):
+                prev_ev = MIAA_STANDARD_EVENTS[current_ev_idx - 1]
+                st.session_state["live_score_event"] = prev_ev
+                st.session_state[f"live_heat_filter_{selected_meet.id}_{prev_ev.code}"] = "All Heats"
+                st.rerun()
+        with next_btn_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Next ▶", disabled=(current_ev_idx >= len(MIAA_STANDARD_EVENTS) - 1), key="live_next_event_btn"):
+                next_ev = MIAA_STANDARD_EVENTS[current_ev_idx + 1]
+                st.session_state["live_score_event"] = next_ev
+                st.session_state[f"live_heat_filter_{selected_meet.id}_{next_ev.code}"] = "All Heats"
+                st.rerun()
+
+        active_ev = nav_ev_col.selectbox(
+            "Event",
+            options=MIAA_STANDARD_EVENTS,
+            index=current_ev_idx,
+            format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
+            key="live_score_event_select",
+        )
+        st.session_state["live_score_event"] = active_ev
+
+        current_seeding_mode = st.session_state.get(
+            f"seeding_mode_{selected_meet.id}", "Dual-Meet Odd / Even Lanes"
+        )
+        current_odd_team = st.session_state.get(f"odd_lanes_team_{selected_meet.id}", selected_team)
+        current_even_team = st.session_state.get(f"even_lanes_team_{selected_meet.id}", None)
+        ev_seeded_rows = _get_seeded_rows_for_event(
+            active_ev.code,
+            seeding_mode=current_seeding_mode,
+            odd_team_id=current_odd_team.id if current_odd_team else None,
+            even_team_id=current_even_team.id if current_even_team else None,
+        )
+
+        if not ev_seeded_rows:
             st.info("Add entries for this event in Tab 2 first.")
         else:
-            perf_inputs: list[PerformanceInput] = []
-            for c in ev_entries:
-                existing_res = db_results.get(c.entry_id)
-                cols = st.columns([2.2, 1.2, 1.0, 0.8])
-                cols[0].markdown(f"**{c.team_code}** — {c.athlete_name}" + (" *(EXH)*" if c.is_exhibition else ""))
+            avail_heats = sorted({int(r["heat"]) for r in ev_seeded_rows})
+            heat_filter_choice = top_heat_col.selectbox(
+                "Heat",
+                options=["All Heats"] + [f"Heat {h}" for h in avail_heats],
+                key=f"live_heat_filter_{selected_meet.id}_{active_ev.code}",
+            )
+
+            cand_by_id = {c.entry_id: c for c in candidates}
+            visible_rows = (
+                ev_seeded_rows
+                if heat_filter_choice == "All Heats"
+                else [
+                    r
+                    for r in ev_seeded_rows
+                    if f"Heat {r['heat']}" == heat_filter_choice
+                ]
+            )
+
+            all_perf_inputs: list[PerformanceInput] = []
+            visible_entry_ids = {int(r["entry_id"]) for r in visible_rows}
+
+            h_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
+            h_cols[0].caption("LANE")
+            h_cols[1].caption("TEAM")
+            h_cols[2].caption("ATHLETE / RELAY")
+            h_cols[3].caption("SEED")
+            h_cols[4].caption("PTS" if active_ev.is_diving else "RESULT TIME")
+            h_cols[5].caption("DQ")
+            h_cols[6].caption("SCR")
+            h_cols[7].caption("OFFICIAL")
+            h_cols[8].caption("PLACE")
+            h_cols[9].caption("PTS")
+
+            raw_inputs_by_id: dict[int, PerformanceInput] = {}
+            for r in ev_seeded_rows:
+                eid = int(r["entry_id"])
+                c = cand_by_id.get(eid)
+                if not c:
+                    continue
+                existing_res = db_results.get(eid)
                 default_mark = (
                     str(existing_res.diving_score)
                     if (active_ev.is_diving and existing_res and existing_res.diving_score is not None)
@@ -695,70 +791,95 @@ def render_meet_center_view(
                     if (existing_res and existing_res.final_time_ms)
                     else ""
                 )
-                mark_val = cols[1].text_input(
-                    "Diving Pts" if active_ev.is_diving else "Time",
-                    value=default_mark,
-                    key=f"mark_{c.entry_id}",
-                    label_visibility="collapsed",
-                )
-                status_opts = ["OK", "DQ", "SCRATCH"]
-                default_status = (
-                    "DQ"
-                    if (existing_res and existing_res.state == ResultState.DISQUALIFIED)
-                    else "SCRATCH"
-                    if (existing_res and existing_res.state == ResultState.SCRATCH)
-                    else "OK"
-                )
-                status_val = cols[2].selectbox(
-                    "Status",
-                    options=status_opts,
-                    index=status_opts.index(default_status),
-                    key=f"status_{c.entry_id}",
-                    label_visibility="collapsed",
-                )
-                cols[3].caption("EXH" if c.is_exhibition else "SCORING")
+                default_dq = bool(existing_res and existing_res.state == ResultState.DISQUALIFIED)
+                default_scr = bool(existing_res and existing_res.state == ResultState.SCRATCH)
+
+                if eid in visible_entry_ids:
+                    row_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
+                    row_cols[0].markdown(f"**{r['lane']}**")
+                    row_cols[1].markdown(f"`{c.team_code}`")
+                    exh_tag = " *(EXH)*" if c.is_exhibition else ""
+                    row_cols[2].markdown(f"{c.athlete_name}{exh_tag}")
+                    row_cols[3].caption(r["seed_time"])
+
+                    mark_val = row_cols[4].text_input(
+                        "Time",
+                        value=default_mark,
+                        key=f"mark_{eid}",
+                        label_visibility="collapsed",
+                    )
+                    is_dq = row_cols[5].checkbox(
+                        "DQ",
+                        value=default_dq,
+                        key=f"dq_{eid}",
+                        label_visibility="collapsed",
+                    )
+                    is_scr = row_cols[6].checkbox(
+                        "SCR",
+                        value=default_scr and not is_dq,
+                        key=f"scr_{eid}",
+                        label_visibility="collapsed",
+                    )
+                    status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
+                else:
+                    mark_val = st.session_state.get(f"mark_{eid}", default_mark)
+                    is_dq = st.session_state.get(f"dq_{eid}", default_dq)
+                    is_scr = st.session_state.get(f"scr_{eid}", default_scr)
+                    status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
 
                 diving_pts = Decimal(mark_val) if (active_ev.is_diving and mark_val.strip()) else None
                 time_ms = None if active_ev.is_diving else parse_time_to_ms(mark_val)
-                perf_inputs.append(
-                    PerformanceInput(
-                        entry_id=c.entry_id,
-                        team_id=c.team_id,
-                        team_code=c.team_code,
-                        event_code=active_ev.code,
-                        athlete_name=c.athlete_name,
-                        is_relay=active_ev.is_relay,
-                        is_exhibition=c.is_exhibition,
-                        is_diving=active_ev.is_diving,
-                        status=status_val,
-                        final_time_ms=time_ms,
-                        diving_score=diving_pts,
-                    )
+                perf = PerformanceInput(
+                    entry_id=eid,
+                    team_id=c.team_id,
+                    team_code=c.team_code,
+                    event_code=active_ev.code,
+                    athlete_name=c.athlete_name,
+                    is_relay=active_ev.is_relay,
+                    is_exhibition=c.is_exhibition,
+                    is_diving=active_ev.is_diving,
+                    status=status_val,
+                    final_time_ms=time_ms,
+                    diving_score=diving_pts,
                 )
+                raw_inputs_by_id[eid] = perf
+                all_perf_inputs.append(perf)
 
-            scored = score_event_performances(
-                perf_inputs, is_relay=active_ev.is_relay, is_diving=active_ev.is_diving
+            scored_all = score_event_performances(
+                all_perf_inputs, is_relay=active_ev.is_relay, is_diving=active_ev.is_diving
             )
-            st.dataframe(
-                [
-                    {
-                        "Place": "EXH" if s.is_exhibition else (s.place or "-"),
-                        "Team": s.team_code,
-                        "Athlete / Relay": s.athlete_name,
-                        "Result": str(s.diving_score) if active_ev.is_diving else format_time_ms(s.final_time_ms),
-                        "Status": s.status,
-                        "Points": f"{s.points:.2f}",
-                    }
-                    for s in scored
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
+            scored_by_id = {s.entry_id: s for s in scored_all}
+
+            for r in visible_rows:
+                eid = int(r["entry_id"])
+                s = scored_by_id.get(eid)
+                if not s:
+                    continue
+                off_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
+                if s.status == "DQ":
+                    off_str = "DQ"
+                    place_str = "DQ"
+                elif s.status == "SCRATCH":
+                    off_str = "SCR"
+                    place_str = "-"
+                else:
+                    off_str = (
+                        str(s.diving_score)
+                        if (active_ev.is_diving and s.diving_score is not None)
+                        else format_time_ms(s.final_time_ms)
+                        if s.final_time_ms
+                        else "-"
+                    )
+                    place_str = "EXH" if s.is_exhibition else (str(s.place) if s.place else "-")
+
+                off_cols[7].markdown(f"**{off_str}**")
+                off_cols[8].markdown(place_str)
+                off_cols[9].markdown(f"**{s.points:.2f}**")
 
             if active_user and not selected_meet.is_locked and st.button("Save Event Results", type="primary"):
                 saved_primary = 0
                 queued_offline = 0
-                for s in scored:
+                for s in scored_all:
                     r_state = (
                         ResultState.DISQUALIFIED
                         if s.status == "DQ"
@@ -791,118 +912,6 @@ def render_meet_center_view(
                 st.rerun()
 
     with tab_reports:
-        st.divider()
-        st.subheader("Pre-Meet & Pool-Deck Sheets (Check-In, Heat Sheet & Timer Sheets)")
-
-        checkin_roster: list[dict] = []
-        for sr in season_rosters:
-            ath = athlete_map.get(sr.athlete_id)
-            tm = team_map.get(sr.team_id)
-            if ath:
-                checkin_roster.append(
-                    {
-                        "athlete_id": ath.id,
-                        "team_code": tm.code if tm else "",
-                        "first_name": ath.first_name,
-                        "last_name": ath.last_name,
-                        "preferred_name": ath.preferred_name,
-                        "grad_year": ath.grad_year,
-                        "gender": ath.gender,
-                    }
-                )
-
-        db_entry_attrs = {
-            e.id: {
-                "heat_number": getattr(e, "heat_number", None),
-                "lane_number": getattr(e, "lane_number", None),
-                "is_exhibition": bool(e.is_exhibition),
-            }
-            for e in db_entries
-        }
-        athlete_grad_map = {a.id: a.grad_year for a in athletes}
-        athlete_name_map = {a.id: f"{a.first_name} {a.last_name}" for a in athletes}
-
-        rep_c1, rep_c2, rep_c3 = st.columns(3)
-
-        checkin_team_code = rep_c1.selectbox(
-            "Check-In Team Filter",
-            options=["All Teams"] + [t.code for t in teams],
-            key=f"checkin_team_filter_{selected_meet.id}",
-        )
-        active_checkin_filter = None if checkin_team_code == "All Teams" else checkin_team_code
-
-        rep_c1.download_button(
-            "Download Swimmer Check-In (HTML)",
-            data=render_swimmer_checkin_html(
-                meet_name=selected_meet.name,
-                meet_date=selected_meet.meet_date,
-                roster_rows=checkin_roster,
-                candidates=candidates,
-                team_code_filter=active_checkin_filter,
-            ),
-            file_name=f"meet_{selected_meet.id}_checkin.html",
-            mime="text/html",
-        )
-        rep_c1.download_button(
-            "Download Swimmer Check-In (CSV)",
-            data=render_swimmer_checkin_csv(
-                roster_rows=checkin_roster,
-                candidates=candidates,
-                team_code_filter=active_checkin_filter,
-            ),
-            file_name=f"meet_{selected_meet.id}_checkin.csv",
-            mime="text/csv",
-        )
-
-        rep_c2.markdown("**Meet Program (Heat Sheet)**")
-        rep_c2.caption("2-column heat sheet with heats, lanes, relay legs & seed times.")
-        rep_c2.download_button(
-            "Download Meet Program / Heat Sheet (HTML)",
-            data=render_meet_program_html(
-                meet_name=selected_meet.name,
-                meet_date=selected_meet.meet_date,
-                course_label=selected_meet.course.value,
-                lane_count=selected_meet.lane_count,
-                candidates=candidates,
-                athlete_grad_map=athlete_grad_map,
-                athlete_name_map=athlete_name_map,
-                heat_lane_overrides=heat_lane_overrides,
-                db_entry_attrs=db_entry_attrs,
-            ),
-            file_name=f"meet_{selected_meet.id}_program_heat_sheet.html",
-            mime="text/html",
-        )
-
-        timer_version_label = rep_c3.selectbox(
-            "Timer Sheet Version",
-            options=[
-                "By Lane (1 Sheet per Lane)",
-                "By Event & Heat (All Lanes)",
-                "Clipboard Fill-In (Compact)",
-            ],
-            key=f"timer_sheet_version_{selected_meet.id}",
-        )
-        timer_ver_key = (
-            "by_lane"
-            if timer_version_label.startswith("By Lane")
-            else "by_event"
-            if timer_version_label.startswith("By Event")
-            else "clipboard"
-        )
-        rep_c3.download_button(
-            "Download Timer Sheets (HTML)",
-            data=render_timer_sheets_html(
-                meet_name=selected_meet.name,
-                meet_date=selected_meet.meet_date,
-                lane_count=selected_meet.lane_count,
-                candidates=candidates,
-                version=timer_ver_key,
-                heat_lane_overrides=heat_lane_overrides,
-                db_entry_attrs=db_entry_attrs,
-            ),
-            file_name=f"meet_{selected_meet.id}_timer_sheets_{timer_ver_key}.html",
-            mime="text/html",
-        )
         all_scored: list[ScoredPerformance] = []
         boys_totals: dict[str, Decimal] = {}
         girls_totals: dict[str, Decimal] = {}
@@ -983,6 +992,119 @@ def render_meet_center_view(
             mime="text/csv",
         )
 
+        st.divider()
+        st.subheader("Pre-Meet & Pool-Deck Sheets (Check-In, Heat Sheet & Timer Sheets)")
+
+        checkin_roster: list[dict] = []
+        for sr in season_rosters:
+            ath = athlete_map.get(sr.athlete_id)
+            tm = team_map.get(sr.team_id)
+            if ath:
+                checkin_roster.append(
+                    {
+                        "athlete_id": ath.id,
+                        "team_code": tm.code if tm else "",
+                        "first_name": ath.first_name,
+                        "last_name": ath.last_name,
+                        "preferred_name": ath.preferred_name,
+                        "grad_year": ath.grad_year,
+                        "gender": ath.gender,
+                    }
+                )
+
+        db_entry_attrs = {
+            e.id: {
+                "heat_number": getattr(e, "heat_number", None),
+                "lane_number": getattr(e, "lane_number", None),
+                "is_exhibition": bool(e.is_exhibition),
+            }
+            for e in db_entries
+        }
+        athlete_grad_map = {a.id: a.grad_year for a in athletes}
+        athlete_name_map = {a.id: f"{a.first_name} {a.last_name}" for a in athletes}
+
+        rep_c1, rep_c2, rep_c3 = st.columns(3)
+
+        checkin_team_code = rep_c1.selectbox(
+            "Check-In Team Filter",
+            options=["All Teams"] + [t.code for t in teams],
+            key=f"checkin_team_filter_{selected_meet.id}",
+        )
+        active_checkin_filter = None if checkin_team_code == "All Teams" else checkin_team_code
+
+        rep_c1.download_button(
+            "Download Swimmer Check-In (HTML)",
+            data=render_swimmer_checkin_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                roster_rows=checkin_roster,
+                candidates=candidates,
+                team_code_filter=active_checkin_filter,
+            ),
+            file_name=f"meet_{selected_meet.id}_checkin.html",
+            mime="text/html",
+        )
+        rep_c1.download_button(
+            "Download Swimmer Check-In (CSV)",
+            data=render_swimmer_checkin_csv(
+                roster_rows=checkin_roster,
+                candidates=candidates,
+                team_code_filter=active_checkin_filter,
+            ),
+            file_name=f"meet_{selected_meet.id}_checkin.csv",
+            mime="text/csv",
+        )
+
+        rep_c2.markdown("**Meet Program (Heat Sheet)**")
+        rep_c2.caption("2-column portrait heat sheet with heats, lanes, relay legs & seed times.")
+        rep_c2.download_button(
+            "Download Meet Program / Heat Sheet (HTML)",
+            data=render_meet_program_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                course_label=selected_meet.course.value,
+                lane_count=selected_meet.lane_count,
+                candidates=candidates,
+                athlete_grad_map=athlete_grad_map,
+                athlete_name_map=athlete_name_map,
+                heat_lane_overrides=heat_lane_overrides,
+                db_entry_attrs=db_entry_attrs,
+            ),
+            file_name=f"meet_{selected_meet.id}_program_heat_sheet.html",
+            mime="text/html",
+        )
+
+        timer_version_label = rep_c3.selectbox(
+            "Timer Sheet Version",
+            options=[
+                "By Lane (1 Sheet per Lane)",
+                "By Event & Heat (All Lanes)",
+                "Clipboard Fill-In (Compact)",
+            ],
+            key=f"timer_sheet_version_{selected_meet.id}",
+        )
+        timer_ver_key = (
+            "by_lane"
+            if timer_version_label.startswith("By Lane")
+            else "by_event"
+            if timer_version_label.startswith("By Event")
+            else "clipboard"
+        )
+        rep_c3.download_button(
+            "Download Timer Sheets (HTML)",
+            data=render_timer_sheets_html(
+                meet_name=selected_meet.name,
+                meet_date=selected_meet.meet_date,
+                lane_count=selected_meet.lane_count,
+                candidates=candidates,
+                version=timer_ver_key,
+                heat_lane_overrides=heat_lane_overrides,
+                db_entry_attrs=db_entry_attrs,
+            ),
+            file_name=f"meet_{selected_meet.id}_timer_sheets_{timer_ver_key}.html",
+            mime="text/html",
+        )
+
         if active_user and not selected_meet.is_locked:
             if st.button("Official Referee Sign-Off & Lock Meet"):
                 with repo.session() as session:
@@ -1001,13 +1123,3 @@ def render_meet_center_view(
                         session.commit()
                 st.success("Meet signed off and locked.")
                 st.rerun()
-
-from integrations.meet_exporters import (
-    export_hytek_sdif_results,
-    export_meet_results_csv,
-    render_meet_program_html,
-    render_printable_results_html,
-    render_swimmer_checkin_csv,
-    render_swimmer_checkin_html,
-    render_timer_sheets_html,
-)
