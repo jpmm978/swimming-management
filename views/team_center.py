@@ -113,6 +113,87 @@ def render_team_center_view(
                             except Exception as exc:
                                 st.error(f"Could not add athlete: {exc}")
 
+            if roster:
+                with st.expander("Edit Swimmer Details", expanded=False):
+                    roster_by_id = {int(r["athlete_id"]): r for r in roster}
+                    selected_edit_id = st.selectbox(
+                        "Select Swimmer to Edit",
+                        options=[int(r["athlete_id"]) for r in roster],
+                        format_func=lambda aid: (
+                            f"{roster_by_id[aid]['last_name']}, {roster_by_id[aid]['first_name']} "
+                            f"({roster_by_id[aid].get('grad_year') or '—'} · {roster_by_id[aid].get('gender') or '?'})"
+                        ),
+                        key=f"edit_swimmer_sel_{selected_team.id}_{selected_season.id}",
+                    )
+                    cur_row = roster_by_id[selected_edit_id]
+
+                    ec1, ec2, ec3 = st.columns([1.4, 1.4, 1.2])
+                    ed_first = ec1.text_input(
+                        "First Name",
+                        value=cur_row.get("first_name") or "",
+                        key=f"ed_fname_{selected_edit_id}",
+                    )
+                    ed_last = ec2.text_input(
+                        "Last Name",
+                        value=cur_row.get("last_name") or "",
+                        key=f"ed_lname_{selected_edit_id}",
+                    )
+                    ed_pref = ec3.text_input(
+                        "Preferred Name",
+                        value=cur_row.get("preferred_name") or "",
+                        key=f"ed_pref_{selected_edit_id}",
+                    )
+
+                    ec4, ec5, ec6, ec7 = st.columns([1.0, 1.0, 1.1, 1.1])
+                    ed_grad = ec4.number_input(
+                        "Grad Year",
+                        min_value=2020,
+                        max_value=2035,
+                        value=int(cur_row["grad_year"]) if cur_row.get("grad_year") else 2028,
+                        key=f"ed_grad_{selected_edit_id}",
+                    )
+                    gender_opts = ["", "M", "F", "X"]
+                    cur_gender = cur_row.get("gender") or ""
+                    ed_gender = ec5.selectbox(
+                        "Gender",
+                        options=gender_opts,
+                        index=gender_opts.index(cur_gender) if cur_gender in gender_opts else 0,
+                        key=f"ed_gender_{selected_edit_id}",
+                    )
+                    ed_elig = ec6.checkbox(
+                        "Eligibility Verified",
+                        value=bool(cur_row.get("eligibility_verified", False)),
+                        key=f"ed_elig_{selected_edit_id}",
+                    )
+                    status_opts = ["active", "inactive", "ineligible"]
+                    ed_status = ec7.selectbox(
+                        "Roster Status",
+                        options=status_opts,
+                        index=0,
+                        key=f"ed_status_{selected_edit_id}",
+                    )
+
+                    if st.button("Save Swimmer Changes", type="primary", key=f"save_swimmer_edit_{selected_edit_id}"):
+                        try:
+                            repo.update_athlete(
+                                actor_user_id=active_user.id,
+                                org_id=selected_org.id,
+                                athlete_id=selected_edit_id,
+                                first_name=ed_first,
+                                last_name=ed_last,
+                                grad_year=int(ed_grad),
+                                gender=ed_gender or None,
+                                preferred_name=ed_pref or None,
+                                team_id=selected_team.id,
+                                season_id=selected_season.id,
+                                eligibility_verified=ed_elig,
+                                roster_status=ed_status,
+                            )
+                            st.success(f"Updated {ed_first} {ed_last}.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Could not update swimmer: {exc}")
+
     with tab_import:
         st.markdown("Upload a CSV roster (`first_name, last_name, grad_year, gender, eligibility_verified`) or HY-TEK `.sd3` file.")
         source_format = st.radio("Import Format", options=["CSV Roster", "HY-TEK SDIF (.sd3)"], horizontal=True)
