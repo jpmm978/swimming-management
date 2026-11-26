@@ -139,11 +139,11 @@ def render_meet_center_view(
             r.entry_id: r
             for r in session.scalars(select(OfficialResult).where(OfficialResult.meet_id == selected_meet.id)).all()
         }
-        relay_audit_logs = list(
+        meet_audit_logs = list(
             session.scalars(
                 select(AuditLog)
                 .where(
-                    AuditLog.action == "meet.relay_squad_saved",
+                    AuditLog.action.in_(["meet.relay_squad_saved", "meet.result_decision_note"]),
                     AuditLog.entity_type == "entry",
                 )
                 .order_by(AuditLog.id)
@@ -155,18 +155,31 @@ def render_meet_center_view(
         athlete_ids_by_team.setdefault(sr.team_id, set()).add(sr.athlete_id)
 
     relay_meta_by_entry: dict[int, dict] = {}
-    for log in relay_audit_logs:
+    decision_meta_by_entry: dict[int, dict] = {}
+    for log in meet_audit_logs:
         if log.entity_id and log.entity_id.isdigit():
             eid = int(log.entity_id)
             details = log.details or {}
             if details.get("meet_id") == selected_meet.id:
-                relay_meta_by_entry[eid] = {
-                    "squad": details.get("squad", "A"),
-                    "member_ids": details.get("member_ids", []),
-                }
+                if log.action == "meet.relay_squad_saved":
+                    relay_meta_by_entry[eid] = {
+                        "squad": details.get("squad", "A"),
+                        "member_ids": details.get("member_ids", []),
+                    }
+                elif log.action == "meet.result_decision_note":
+                    decision_meta_by_entry[eid] = {
+                        "is_jd": bool(details.get("is_jd", False)),
+                        "decision_note": str(details.get("decision_note", "")),
+                    }
 
     heat_lane_overrides: dict[int, dict[str, int]] = st.session_state.setdefault(
         f"heat_lane_overrides_meet_{selected_meet.id}", {}
+    )
+    jd_overrides: dict[int, int] = st.session_state.setdefault(
+        f"jd_overrides_meet_{selected_meet.id}", {}
+    )
+    place_overrides: dict[int, int] = st.session_state.setdefault(
+        f"place_overrides_meet_{selected_meet.id}", {}
     )
 
     auto_squad_counter: dict[tuple[int, str], int] = {}
@@ -777,7 +790,6 @@ def render_meet_center_view(
             h_cols[8].caption("PLACE")
             h_cols[9].caption("PTS")
 
-            raw_inputs_by_id: dict[int, PerformanceInput] = {}
             for r in ev_seeded_rows:
                 eid = int(r["entry_id"])
                 c = cand_by_id.get(eid)
@@ -841,8 +853,9 @@ def render_meet_center_view(
                     status=status_val,
                     final_time_ms=time_ms,
                     diving_score=diving_pts,
+                    jd_priority=jd_overrides.get(eid),
+                    place_override=place_overrides.get(eid),
                 )
-                raw_inputs_by_id[eid] = perf
                 all_perf_inputs.append(perf)
 
             scored_all = score_event_performances(
@@ -870,11 +883,65 @@ def render_meet_center_view(
                         if s.final_time_ms
                         else "-"
                     )
-                    place_str = "EXH" if s.is_exhibition else (str(s.place) if s.place else "-")
+                    if s.is_exhibition:
+                        place_str = "EXH"
+                    elif s.place:
+                        place_str = f"{s.place} (JD)" if s.is_jd else str(s.place)
+                    else:
+                        place_str = "-"
 
                 off_cols[7].markdown(f"**{off_str}**")
                 off_cols[8].markdown(place_str)
                 off_cols[9].markdown(f"**{s.points:.2f}**")
+                if s.decision_note:
+                    st.caption(f"Lane {r['lane']} ({s.team_code} {s.athlete_name}): {s.decision_note}")
+
+            if active_user and not selected_meet.is_locked:
+                with st.expander("Judge's Decision (JD) & Place Override", expanded=False):
+                    jd_c1, jd_c2, jd_c3, jd_c4 = st.columns([2.2, 1.0, 1.0, 1.1])
+                    jd_target_row = jd_c1.selectbox(
+                        "Swimmer / Relay",
+                        options=ev_seeded_rows,
+                        format_func=lambda r: (
+                            f"H{r['heat']} · L{r['lane']} — {r['team_code']} {r['athlete_name']}"
+                        ),
+                        key=f"jd_target_sel_{selected_meet.id}_{active_ev.code}",
+                    )
+                    jd_eid = int(jd_target_row["entry_id"])
+                    jd_rank_input = int(
+                        jd_c2.number_input(
+                            "JD Order (0 = None)",
+                            min_value=0,
+                            max_value=8,
+                            value=int(jd_overrides.get(jd_eid, 0)),
+                            help="Set 1 for JD winner on a tie, 2 for runner-up, etc. Set 0 to clear.",
+                            key=f"jd_rank_num_{selected_meet.id}_{active_ev.code}_{jd_eid}",
+                        )
+                    )
+                    place_ov_input = int(
+                        jd_c3.number_input(
+                            "Place Override (0 = Auto)",
+                            min_value=0,
+                            max_value=12,
+                            value=int(place_overrides.get(jd_eid, 0)),
+                            help="Override finishing place directly (1, 2, 3...). Set 0 for automatic.",
+                            key=f"place_ov_num_{selected_meet.id}_{active_ev.code}_{jd_eid}",
+                        )
+                    )
+                    jd_c4.markdown("<br>", unsafe_allow_html=True)
+                    if jd_c4.button("Apply JD / Override", key=f"apply_jd_btn_{active_ev.code}_{jd_eid}"):
+                        if jd_rank_input > 0:
+                            jd_overrides[jd_eid] = jd_rank_input
+                        else:
+                            jd_overrides.pop(jd_eid, None)
+
+                        if place_ov_input > 0:
+                            place_overrides[jd_eid] = place_ov_input
+                        else:
+                            place_overrides.pop(jd_eid, None)
+
+                        st.success(f"Updated JD / place override for {jd_target_row['athlete_name']}.")
+                        st.rerun()
 
             if active_user and not selected_meet.is_locked and st.button("Save Event Results", type="primary"):
                 saved_primary = 0
@@ -902,12 +969,32 @@ def render_meet_center_view(
                         diving_score=s.diving_score,
                         place=s.place,
                         points_awarded=s.points,
-                        revision_reason=f"Saved event {active_ev.code} from Meet Center",
+                        revision_reason=s.decision_note or f"Saved event {active_ev.code} from Meet Center",
                     )
                     if outcome == "saved_primary":
                         saved_primary += 1
                     else:
                         queued_offline += 1
+
+                with repo.session() as session:
+                    for s in scored_all:
+                        if s.decision_note or s.is_jd:
+                            repo.record_audit(
+                                session,
+                                action="meet.result_decision_note",
+                                entity_type="entry",
+                                entity_id=s.entry_id,
+                                org_id=selected_meet.host_org_id,
+                                actor_user_id=active_user.id,
+                                details={
+                                    "meet_id": selected_meet.id,
+                                    "event_code": s.event_code,
+                                    "is_jd": s.is_jd,
+                                    "decision_note": s.decision_note,
+                                },
+                            )
+                    session.commit()
+
                 st.success(f"Saved directly: {saved_primary} · Queued offline: {queued_offline}.")
                 st.rerun()
 
@@ -921,6 +1008,7 @@ def render_meet_center_view(
             if not res:
                 continue
             spec = EVENT_BY_CODE.get(c.event_code)
+            d_meta = decision_meta_by_entry.get(c.entry_id, {})
             sp = ScoredPerformance(
                 entry_id=c.entry_id,
                 team_id=c.team_id,
@@ -933,6 +1021,8 @@ def render_meet_center_view(
                 diving_score=Decimal(str(res.diving_score)) if res.diving_score is not None else None,
                 place=res.place,
                 points=Decimal(str(res.points_awarded)),
+                is_jd=bool(d_meta.get("is_jd", False)),
+                decision_note=str(d_meta.get("decision_note", "")),
             )
             all_scored.append(sp)
             if spec and spec.gender == "B":
