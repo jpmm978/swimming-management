@@ -628,7 +628,18 @@ def render_meet_center_view(
         if seeded:
             heat_numbers = sorted({int(r["heat"]) for r in seeded})
             st.caption(f"Total Heats in Event: **{len(heat_numbers)}** ({', '.join(f'Heat {h}' for h in heat_numbers)})")
-            st.dataframe(seeded, use_container_width=True, hide_index=True)
+            display_seeded = [
+                {
+                    "Heat": r["heat"],
+                    "Lane": r["lane"],
+                    "Team": r["team_code"],
+                    "Athlete / Relay": r["athlete_name"],
+                    "Seed Time": r["seed_time"],
+                    "EXH": r["is_exhibition"],
+                }
+                for r in seeded
+            ]
+            st.dataframe(display_seeded, width="stretch", hide_index=True)
 
             if active_user and not selected_meet.is_locked:
                 with st.expander("Edit Saved Entry (Exhibition EXH, Heat, Lane & Seed Time)", expanded=False):
