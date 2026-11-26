@@ -94,6 +94,8 @@ class PerformanceInput:
     status: str = "OK"
     final_time_ms: Optional[int] = None
     diving_score: Optional[Decimal] = None
+    jd_priority: Optional[int] = None
+    place_override: Optional[int] = None
 
 
 @dataclass
@@ -109,6 +111,8 @@ class ScoredPerformance:
     diving_score: Optional[Decimal]
     place: Optional[int]
     points: Decimal
+    is_jd: bool = False
+    decision_note: str = ""
 
 
 def format_time_ms(ms: Optional[int]) -> str:
@@ -397,10 +401,24 @@ def score_event_performances(
         else:
             non_scoring.append(p)
 
+    # Sort primarily by mark (ascending time or descending diving score),
+    # then by manual place_override if provided, then by jd_priority
     if is_diving:
-        valid_contenders.sort(key=lambda p: p.diving_score or Decimal("0"), reverse=True)
+        valid_contenders.sort(
+            key=lambda p: (
+                -(p.diving_score or Decimal("0")),
+                p.place_override if p.place_override is not None else 999,
+                p.jd_priority if p.jd_priority is not None else 999,
+            )
+        )
     else:
-        valid_contenders.sort(key=lambda p: p.final_time_ms or 999_999_999)
+        valid_contenders.sort(
+            key=lambda p: (
+                p.final_time_ms or 999_999_999,
+                p.place_override if p.place_override is not None else 999,
+                p.jd_priority if p.jd_priority is not None else 999,
+            )
+        )
 
     team_scoring_used: dict[int, int] = {}
     point_eligible_entries: set[int] = set()
@@ -425,44 +443,119 @@ def score_event_performances(
                 break
             tie_end += 1
 
-        place = idx + 1
-        eligible_in_group = [
-            valid_contenders[pos]
-            for pos in range(idx, tie_end)
-            if valid_contenders[pos].entry_id in point_eligible_entries
-        ]
-
-        pooled_points = Decimal("0.00")
-        for pos in range(idx, tie_end):
-            if pos < len(points_table):
-                pooled_points += points_table[pos]
-
-        split_points = (
-            (pooled_points / Decimal(len(eligible_in_group))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            if eligible_in_group
-            else Decimal("0.00")
+        tie_group = valid_contenders[idx:tie_end]
+        tie_size = len(tie_group)
+        mark_label = (
+            str(tie_group[0].diving_score)
+            if is_diving
+            else format_time_ms(tie_group[0].final_time_ms)
         )
 
-        for pos in range(idx, tie_end):
-            p = valid_contenders[pos]
-            is_eligible = p.entry_id in point_eligible_entries
-            results.append(
-                ScoredPerformance(
-                    entry_id=p.entry_id,
-                    team_id=p.team_id,
-                    team_code=p.team_code,
-                    event_code=p.event_code,
-                    athlete_name=p.athlete_name,
-                    status=p.status,
-                    is_exhibition=False,
-                    final_time_ms=p.final_time_ms,
-                    diving_score=p.diving_score,
-                    place=place,
-                    points=split_points if is_eligible else Decimal("0.00"),
-                )
+        # Check if a Judge's Decision (jd_priority) resolves this tied group
+        has_jd = tie_size > 1 and any(p.jd_priority is not None for p in tie_group)
+
+        if has_jd:
+            tie_group_sorted = sorted(
+                tie_group,
+                key=lambda p: (
+                    p.jd_priority if p.jd_priority is not None else 999,
+                    p.place_override if p.place_override is not None else 999,
+                ),
             )
+            for offset, p in enumerate(tie_group_sorted):
+                pos = idx + offset
+                computed_place = pos + 1
+                final_place = p.place_override if p.place_override is not None else computed_place
+                is_eligible = p.entry_id in point_eligible_entries
+                pts = (
+                    points_table[final_place - 1]
+                    if (is_eligible and 1 <= final_place <= len(points_table))
+                    else Decimal("0.00")
+                )
+                note_parts = [
+                    f"Judge's Decision (JD): placed #{final_place} on tied mark ({mark_label}); full place points"
+                ]
+                if p.place_override is not None:
+                    note_parts.append(f"Manual place override (#{p.place_override})")
+                if not is_eligible and is_relay:
+                    note_parts.append("3rd team relay (non-scoring)")
+                results.append(
+                    ScoredPerformance(
+                        entry_id=p.entry_id,
+                        team_id=p.team_id,
+                        team_code=p.team_code,
+                        event_code=p.event_code,
+                        athlete_name=p.athlete_name,
+                        status=p.status,
+                        is_exhibition=False,
+                        final_time_ms=p.final_time_ms,
+                        diving_score=p.diving_score,
+                        place=final_place,
+                        points=pts,
+                        is_jd=True,
+                        decision_note="; ".join(note_parts),
+                    )
+                )
+        else:
+            place = idx + 1
+            eligible_in_group = [
+                valid_contenders[pos]
+                for pos in range(idx, tie_end)
+                if valid_contenders[pos].entry_id in point_eligible_entries
+            ]
+
+            pooled_points = Decimal("0.00")
+            for pos in range(idx, tie_end):
+                if pos < len(points_table):
+                    pooled_points += points_table[pos]
+
+            split_points = (
+                (pooled_points / Decimal(len(eligible_in_group))).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                if eligible_in_group
+                else Decimal("0.00")
+            )
+
+            for pos in range(idx, tie_end):
+                p = valid_contenders[pos]
+                is_eligible = p.entry_id in point_eligible_entries
+                final_place = p.place_override if p.place_override is not None else place
+                pts = split_points if is_eligible else Decimal("0.00")
+                if p.place_override is not None and tie_size == 1:
+                    pts = (
+                        points_table[final_place - 1]
+                        if (is_eligible and 1 <= final_place <= len(points_table))
+                        else Decimal("0.00")
+                    )
+
+                note_parts: list[str] = []
+                if tie_size > 1:
+                    note_parts.append(
+                        f"Tie for Place {place} ({mark_label}) — points split ({pts:.2f} pts each)"
+                    )
+                if p.place_override is not None:
+                    note_parts.append(f"Manual place override (#{p.place_override})")
+                if not is_eligible and is_relay:
+                    note_parts.append("3rd team relay (non-scoring)")
+
+                results.append(
+                    ScoredPerformance(
+                        entry_id=p.entry_id,
+                        team_id=p.team_id,
+                        team_code=p.team_code,
+                        event_code=p.event_code,
+                        athlete_name=p.athlete_name,
+                        status=p.status,
+                        is_exhibition=False,
+                        final_time_ms=p.final_time_ms,
+                        diving_score=p.diving_score,
+                        place=final_place,
+                        points=pts,
+                        is_jd=False,
+                        decision_note="; ".join(note_parts),
+                    )
+                )
         idx = tie_end
 
     for p in non_scoring:
@@ -479,6 +572,8 @@ def score_event_performances(
                 diving_score=p.diving_score,
                 place=None,
                 points=Decimal("0.00"),
+                is_jd=False,
+                decision_note="",
             )
         )
 
