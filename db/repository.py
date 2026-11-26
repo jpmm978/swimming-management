@@ -465,6 +465,81 @@ class SwimRepository:
             session.commit()
             return athlete
 
+    def update_athlete(
+        self,
+        *,
+        actor_user_id: int,
+        org_id: int,
+        athlete_id: int,
+        first_name: str,
+        last_name: str,
+        grad_year: Optional[int] = None,
+        gender: Optional[str] = None,
+        preferred_name: Optional[str] = None,
+        team_id: Optional[int] = None,
+        season_id: Optional[int] = None,
+        eligibility_verified: Optional[bool] = None,
+        roster_status: Optional[str] = None,
+    ) -> Athlete:
+        clean_first = first_name.strip()
+        clean_last = last_name.strip()
+        if not clean_first or not clean_last:
+            raise ValueError("First name and last name are required.")
+
+        with self.session() as session:
+            self.require_roles(
+                session,
+                actor_user_id,
+                COACH_ROLES,
+                org_id=org_id,
+                team_id=team_id,
+                season_id=season_id,
+                action_label="edit athlete details",
+            )
+
+            athlete = session.get(Athlete, athlete_id)
+            if athlete is None:
+                raise ValueError(f"Athlete {athlete_id} not found.")
+
+            athlete.first_name = clean_first
+            athlete.last_name = clean_last
+            athlete.preferred_name = preferred_name.strip() if preferred_name else None
+            athlete.grad_year = grad_year
+            athlete.gender = gender
+
+            if team_id is not None and season_id is not None:
+                roster_entry = session.scalar(
+                    select(SeasonRoster).where(
+                        SeasonRoster.team_id == team_id,
+                        SeasonRoster.season_id == season_id,
+                        SeasonRoster.athlete_id == athlete.id,
+                    )
+                )
+                if roster_entry is not None:
+                    if eligibility_verified is not None:
+                        roster_entry.eligibility_verified = eligibility_verified
+                    if roster_status is not None:
+                        roster_entry.status = roster_status
+
+            self.record_audit(
+                session,
+                action="roster.athlete_updated",
+                entity_type="athlete",
+                entity_id=athlete.id,
+                org_id=org_id,
+                actor_user_id=actor_user_id,
+                details={
+                    "team_id": team_id,
+                    "season_id": season_id,
+                    "first_name": athlete.first_name,
+                    "last_name": athlete.last_name,
+                    "grad_year": athlete.grad_year,
+                    "gender": athlete.gender,
+                },
+            )
+            session.commit()
+            return athlete
+            
     def list_active_roster(self, team_id: int, season_id: int) -> list[dict[str, Any]]:
         with self.session() as session:
             stmt = (
