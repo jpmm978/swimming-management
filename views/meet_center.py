@@ -1255,6 +1255,14 @@ def render_meet_center_view(
         athlete_grad_map = {a.id: a.grad_year for a in athletes}
         athlete_name_map = {a.id: f"{a.first_name} {a.last_name}" for a in athletes}
 
+        rep_seeding_mode = st.session_state.get(
+            f"seeding_mode_{selected_meet.id}", "Dual-Meet Odd / Even Lanes"
+        )
+        rep_odd_team = st.session_state.get(f"odd_lanes_team_{selected_meet.id}", selected_team)
+        rep_even_team = st.session_state.get(f"even_lanes_team_{selected_meet.id}", None)
+        rep_odd_id = rep_odd_team.id if rep_odd_team is not None else None
+        rep_even_id = rep_even_team.id if rep_even_team is not None else None
+
         rep_c1, rep_c2, rep_c3 = st.columns(3)
 
         checkin_team_code = rep_c1.selectbox(
@@ -1299,6 +1307,9 @@ def render_meet_center_view(
                 candidates=candidates,
                 athlete_grad_map=athlete_grad_map,
                 athlete_name_map=athlete_name_map,
+                seeding_mode=rep_seeding_mode,
+                odd_team_id=rep_odd_id,
+                even_team_id=rep_even_id,
                 heat_lane_overrides=heat_lane_overrides,
                 db_entry_attrs=db_entry_attrs,
             ),
@@ -1330,6 +1341,9 @@ def render_meet_center_view(
                 lane_count=selected_meet.lane_count,
                 candidates=candidates,
                 version=timer_ver_key,
+                seeding_mode=rep_seeding_mode,
+                odd_team_id=rep_odd_id,
+                even_team_id=rep_even_id,
                 heat_lane_overrides=heat_lane_overrides,
                 db_entry_attrs=db_entry_attrs,
             ),
