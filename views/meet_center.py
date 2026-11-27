@@ -109,7 +109,6 @@ def render_meet_center_view(
     st.markdown("## Meet Center")
     active_outbox = outbox or DeckOfflineOutbox()
 
-    # Load meet context early so live Girls & Boys scores can be shown at the top
     teams: list[Team] = []
     team_map: dict[int, Team] = {}
     athletes: list[Athlete] = []
@@ -173,7 +172,6 @@ def render_meet_center_view(
             elif spec and spec.gender == "B":
                 boys_scores[t.code] = boys_scores.get(t.code, Decimal("0.00")) + pts
 
-        # Include live unsaved scores from the currently open event in Tab 3
         live_ev_obj = st.session_state.get("live_score_event_select") or st.session_state.get("live_score_event")
         if live_ev_obj is not None:
             live_ev_entries = [e for e in db_entries if e.event_code == live_ev_obj.code]
@@ -237,12 +235,13 @@ def render_meet_center_view(
         with sb_boys:
             _render_gender_scoreboard("Boys Live Scoreboard", boys_scores, team_names_by_code)
 
-    tab_setup, tab_entries, tab_live, tab_reports = st.tabs(
+    tab_setup, tab_entries, tab_live, tab_officials, tab_reports = st.tabs(
         [
             "1. Meet Setup",
             "2. Entries, NFHS Check & Seeding",
             "3. Pool-Deck Timing, Diving & Scoring",
-            "4. Printouts, HY-TEK Export & Sign-Off",
+            "4. Officials Score Audit",
+            "5. Printouts, HY-TEK Export & Sign-Off",
         ]
     )
 
@@ -274,7 +273,7 @@ def render_meet_center_view(
                     st.rerun()
 
     if not selected_meet:
-        for t in (tab_entries, tab_live, tab_reports):
+        for t in (tab_entries, tab_live, tab_officials, tab_reports):
             with t:
                 st.info("Create or select an Active Meet in the top bar first.")
     else:
@@ -1048,8 +1047,6 @@ def render_meet_center_view(
                     ]
                 )
 
-                # Pre-score all entries in the event from current session_state / DB defaults
-                # so OFFICIAL, PLACE, and PTS render inline on the exact same row
                 all_perf_inputs: list[PerformanceInput] = []
                 for r in ev_seeded_rows:
                     eid = int(r["entry_id"])
@@ -1138,7 +1135,7 @@ def render_meet_center_view(
                         key=f"mark_{eid}",
                         label_visibility="collapsed",
                     )
-                    is_dq = row_cols[5].checkbox(
+                    row_cols[5].checkbox(
                         "DQ",
                         value=default_dq,
                         key=f"dq_{eid}",
@@ -1282,6 +1279,163 @@ def render_meet_center_view(
                     st.success(f"Saved directly: {saved_primary} · Queued offline: {queued_offline}.")
                     st.rerun()
 
+        with tab_officials:
+            st.subheader("Officials Score Audit & Event-by-Event Breakdown")
+            st.caption(
+                "Cross-check team points event by event against the officials' sheet and expand any event "
+                "to see how places, ties, Judge's Decisions (JD), and points were calculated."
+            )
+
+            fa1, fa2 = st.columns([1.2, 1.5])
+            gender_filter = fa1.radio(
+                "Category Filter",
+                options=["All", "Girls", "Boys"],
+                horizontal=True,
+                key=f"officials_gender_filter_{selected_meet.id}",
+            )
+            only_scored_events = fa2.checkbox(
+                "Show only events with recorded results",
+                value=False,
+                key=f"officials_only_scored_{selected_meet.id}",
+            )
+
+            gender_code_map = {"All": None, "Girls": "G", "Boys": "B"}
+            target_gender = gender_code_map[gender_filter]
+
+            active_team_codes = sorted({c.team_code for c in candidates if c.team_code})
+            if not active_team_codes:
+                active_team_codes = [t.code for t in teams]
+
+            filtered_events = [
+                ev
+                for ev in MIAA_STANDARD_EVENTS
+                if target_gender is None or ev.gender == target_gender
+            ]
+
+            event_summary_rows: list[dict] = []
+            event_calc_details: list[tuple[Any, dict[str, Decimal], list[dict]]] = []
+
+            for ev in filtered_events:
+                ev_entries = [c for c in candidates if c.event_code == ev.code]
+                ev_perf_inputs: list[PerformanceInput] = []
+                has_any_result = False
+
+                for c in ev_entries:
+                    res = db_results.get(c.entry_id)
+                    d_meta = decision_meta_by_entry.get(c.entry_id, {})
+                    if res is not None:
+                        has_any_result = True
+                        status_val = "DQ" if res.state == ResultState.DISQUALIFIED else (
+                            "SCRATCH" if res.state == ResultState.SCRATCH else "OK"
+                        )
+                        time_ms = res.final_time_ms
+                        div_score = Decimal(str(res.diving_score)) if res.diving_score is not None else None
+                        saved_place = res.place
+                    else:
+                        mark_val = str(st.session_state.get(f"mark_{c.entry_id}", "") or "")
+                        is_dq = bool(st.session_state.get(f"dq_{c.entry_id}", False))
+                        is_scr = bool(st.session_state.get(f"scr_{c.entry_id}", False))
+                        status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
+                        time_ms = None if ev.is_diving else parse_time_to_ms(mark_val)
+                        div_score = Decimal(mark_val) if (ev.is_diving and mark_val.strip()) else None
+                        saved_place = None
+
+                    ev_perf_inputs.append(
+                        PerformanceInput(
+                            entry_id=c.entry_id,
+                            team_id=c.team_id,
+                            team_code=c.team_code,
+                            event_code=ev.code,
+                            athlete_name=c.athlete_name,
+                            is_relay=ev.is_relay,
+                            is_exhibition=c.is_exhibition,
+                            is_diving=ev.is_diving,
+                            status=status_val,
+                            final_time_ms=time_ms,
+                            diving_score=div_score,
+                            jd_priority=jd_overrides.get(c.entry_id),
+                            place_override=(
+                                place_overrides.get(c.entry_id)
+                                if c.entry_id in place_overrides
+                                else saved_place
+                            ),
+                        )
+                    )
+
+                if only_scored_events and not has_any_result:
+                    continue
+
+                scored_ev = score_event_performances(
+                    ev_perf_inputs, is_relay=ev.is_relay, is_diving=ev.is_diving
+                )
+                ev_team_pts: dict[str, Decimal] = {code: Decimal("0.00") for code in active_team_codes}
+                calc_rows: list[dict] = []
+
+                for s in scored_ev:
+                    ev_team_pts[s.team_code] = ev_team_pts.get(s.team_code, Decimal("0.00")) + s.points
+                    mark_disp = (
+                        str(s.diving_score)
+                        if (ev.is_diving and s.diving_score is not None)
+                        else format_time_ms(s.final_time_ms)
+                        if s.final_time_ms
+                        else "-"
+                    )
+                    if s.is_exhibition:
+                        place_disp = "EXH"
+                    elif s.status == "DQ":
+                        place_disp = "DQ"
+                    elif s.status == "SCRATCH":
+                        place_disp = "SCR"
+                    elif s.place:
+                        place_disp = f"{s.place} (JD)" if s.is_jd else str(s.place)
+                    else:
+                        place_disp = "-"
+
+                    calc_rows.append(
+                        {
+                            "Place": place_disp,
+                            "Team": s.team_code,
+                            "Swimmer / Relay": s.athlete_name,
+                            "Mark": mark_disp,
+                            "Status": s.status,
+                            "Points": f"{s.points:.2f}",
+                            "Calculation Note": s.decision_note or (
+                                "Exhibition (0.00 pts)"
+                                if s.is_exhibition
+                                else "Standard place points"
+                                if s.place and s.points > Decimal("0.00")
+                                else "Non-scoring / No mark"
+                            ),
+                        }
+                    )
+
+                summary_row: dict[str, Any] = {
+                    "Event": f"#{ev.event_number} · {ev.name}",
+                    "Category": "Girls" if ev.gender == "G" else "Boys",
+                    "Status": "Recorded" if has_any_result else "Pending",
+                }
+                for code in active_team_codes:
+                    summary_row[f"{code} Pts"] = f"{ev_team_pts.get(code, Decimal('0.00')):.2f}"
+                event_summary_rows.append(summary_row)
+                event_calc_details.append((ev, ev_team_pts, calc_rows))
+
+            if event_summary_rows:
+                st.dataframe(event_summary_rows, width="stretch", hide_index=True)
+
+                st.markdown("#### Expandable Event Calculation Details")
+                for ev, ev_team_pts, calc_rows in event_calc_details:
+                    pts_headline = " · ".join(
+                        f"{code}: {ev_team_pts.get(code, Decimal('0.00')):.2f}"
+                        for code in active_team_codes
+                    )
+                    with st.expander(f"#{ev.event_number} · {ev.name}  —  {pts_headline}", expanded=False):
+                        if calc_rows:
+                            st.dataframe(calc_rows, width="stretch", hide_index=True)
+                        else:
+                            st.caption("No entries in this event.")
+            else:
+                st.info("No events match the current filter.")
+
         with tab_reports:
             all_scored: list[ScoredPerformance] = []
             boys_totals: dict[str, Decimal] = {}
@@ -1314,15 +1468,10 @@ def render_meet_center_view(
                 elif spec and spec.gender == "G":
                     girls_totals[c.team_code] = girls_totals.get(c.team_code, Decimal("0")) + sp.points
 
-            c1, c2 = st.columns(2)
-            c1.subheader("Boys Team Scores")
-            c1.write(boys_totals or "No scored boys events yet.")
-            c2.subheader("Girls Team Scores")
-            c2.write(girls_totals or "No scored girls events yet.")
-
             boys_rows = [r for r in all_scored if EVENT_BY_CODE.get(r.event_code) and EVENT_BY_CODE[r.event_code].gender == "B"]
             girls_rows = [r for r in all_scored if EVENT_BY_CODE.get(r.event_code) and EVENT_BY_CODE[r.event_code].gender == "G"]
 
+            st.subheader("Official Score Sheets & Result Exports")
             d1, d2, d3, d4 = st.columns(4)
             d1.download_button(
                 "Download Boys 1-Page Report (HTML)",
