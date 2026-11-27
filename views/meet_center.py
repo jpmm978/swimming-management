@@ -174,7 +174,7 @@ def render_meet_center_view(
                 boys_scores[t.code] = boys_scores.get(t.code, Decimal("0.00")) + pts
 
         # Include live unsaved scores from the currently open event in Tab 3
-        live_ev_obj = st.session_state.get("live_score_event")
+        live_ev_obj = st.session_state.get("live_score_event_select") or st.session_state.get("live_score_event")
         if live_ev_obj is not None:
             live_ev_entries = [e for e in db_entries if e.event_code == live_ev_obj.code]
             if live_ev_entries:
@@ -980,8 +980,10 @@ def render_meet_center_view(
         with tab_live:
             if "live_score_event" not in st.session_state:
                 st.session_state["live_score_event"] = MIAA_STANDARD_EVENTS[0]
+            if "live_score_event_select" not in st.session_state:
+                st.session_state["live_score_event_select"] = st.session_state["live_score_event"]
 
-            current_ev_obj = st.session_state["live_score_event"]
+            current_ev_obj = st.session_state["live_score_event_select"]
             current_ev_idx = next(
                 (i for i, ev in enumerate(MIAA_STANDARD_EVENTS) if ev.code == getattr(current_ev_obj, "code", None)),
                 0,
@@ -993,6 +995,7 @@ def render_meet_center_view(
                 if st.button("◀ Prev", disabled=(current_ev_idx <= 0), key="live_prev_event_btn"):
                     prev_ev = MIAA_STANDARD_EVENTS[current_ev_idx - 1]
                     st.session_state["live_score_event"] = prev_ev
+                    st.session_state["live_score_event_select"] = prev_ev
                     st.session_state[f"live_heat_filter_{selected_meet.id}_{prev_ev.code}"] = "All Heats"
                     st.rerun()
             with next_btn_col:
@@ -1000,13 +1003,13 @@ def render_meet_center_view(
                 if st.button("Next ▶", disabled=(current_ev_idx >= len(MIAA_STANDARD_EVENTS) - 1), key="live_next_event_btn"):
                     next_ev = MIAA_STANDARD_EVENTS[current_ev_idx + 1]
                     st.session_state["live_score_event"] = next_ev
+                    st.session_state["live_score_event_select"] = next_ev
                     st.session_state[f"live_heat_filter_{selected_meet.id}_{next_ev.code}"] = "All Heats"
                     st.rerun()
 
             active_ev = nav_ev_col.selectbox(
                 "Event",
                 options=MIAA_STANDARD_EVENTS,
-                index=current_ev_idx,
                 format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
                 key="live_score_event_select",
             )
@@ -1045,21 +1048,9 @@ def render_meet_center_view(
                     ]
                 )
 
+                # Pre-score all entries in the event from current session_state / DB defaults
+                # so OFFICIAL, PLACE, and PTS render inline on the exact same row
                 all_perf_inputs: list[PerformanceInput] = []
-                visible_entry_ids = {int(r["entry_id"]) for r in visible_rows}
-
-                h_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
-                h_cols[0].caption("LANE")
-                h_cols[1].caption("TEAM")
-                h_cols[2].caption("ATHLETE / RELAY")
-                h_cols[3].caption("SEED")
-                h_cols[4].caption("PTS" if active_ev.is_diving else "RESULT TIME")
-                h_cols[5].caption("DQ")
-                h_cols[6].caption("SCR")
-                h_cols[7].caption("OFFICIAL")
-                h_cols[8].caption("PLACE")
-                h_cols[9].caption("PTS")
-
                 for r in ev_seeded_rows:
                     eid = int(r["entry_id"])
                     c = cand_by_id.get(eid)
@@ -1076,95 +1067,118 @@ def render_meet_center_view(
                     default_dq = bool(existing_res and existing_res.state == ResultState.DISQUALIFIED)
                     default_scr = bool(existing_res and existing_res.state == ResultState.SCRATCH)
 
-                    if eid in visible_entry_ids:
-                        row_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
-                        row_cols[0].markdown(f"**{r['lane']}**")
-                        row_cols[1].markdown(f"`{c.team_code}`")
-                        exh_tag = " *(EXH)*" if c.is_exhibition else ""
-                        row_cols[2].markdown(f"{c.athlete_name}{exh_tag}")
-                        row_cols[3].caption(r["seed_time"])
-
-                        mark_val = row_cols[4].text_input(
-                            "Time",
-                            value=default_mark,
-                            key=f"mark_{eid}",
-                            label_visibility="collapsed",
-                        )
-                        is_dq = row_cols[5].checkbox(
-                            "DQ",
-                            value=default_dq,
-                            key=f"dq_{eid}",
-                            label_visibility="collapsed",
-                        )
-                        is_scr = row_cols[6].checkbox(
-                            "SCR",
-                            value=default_scr and not is_dq,
-                            key=f"scr_{eid}",
-                            label_visibility="collapsed",
-                        )
-                        status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
-                    else:
-                        mark_val = st.session_state.get(f"mark_{eid}", default_mark)
-                        is_dq = st.session_state.get(f"dq_{eid}", default_dq)
-                        is_scr = st.session_state.get(f"scr_{eid}", default_scr)
-                        status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
+                    mark_val = str(st.session_state.get(f"mark_{eid}", default_mark) or "")
+                    is_dq = bool(st.session_state.get(f"dq_{eid}", default_dq))
+                    is_scr = bool(st.session_state.get(f"scr_{eid}", default_scr and not is_dq))
+                    status_val = "DQ" if is_dq else ("SCRATCH" if is_scr else "OK")
 
                     diving_pts = Decimal(mark_val) if (active_ev.is_diving and mark_val.strip()) else None
                     time_ms = None if active_ev.is_diving else parse_time_to_ms(mark_val)
-                    perf = PerformanceInput(
-                        entry_id=eid,
-                        team_id=c.team_id,
-                        team_code=c.team_code,
-                        event_code=active_ev.code,
-                        athlete_name=c.athlete_name,
-                        is_relay=active_ev.is_relay,
-                        is_exhibition=c.is_exhibition,
-                        is_diving=active_ev.is_diving,
-                        status=status_val,
-                        final_time_ms=time_ms,
-                        diving_score=diving_pts,
-                        jd_priority=jd_overrides.get(eid),
-                        place_override=place_overrides.get(eid),
+                    all_perf_inputs.append(
+                        PerformanceInput(
+                            entry_id=eid,
+                            team_id=c.team_id,
+                            team_code=c.team_code,
+                            event_code=active_ev.code,
+                            athlete_name=c.athlete_name,
+                            is_relay=active_ev.is_relay,
+                            is_exhibition=c.is_exhibition,
+                            is_diving=active_ev.is_diving,
+                            status=status_val,
+                            final_time_ms=time_ms,
+                            diving_score=diving_pts,
+                            jd_priority=jd_overrides.get(eid),
+                            place_override=place_overrides.get(eid),
+                        )
                     )
-                    all_perf_inputs.append(perf)
 
                 scored_all = score_event_performances(
                     all_perf_inputs, is_relay=active_ev.is_relay, is_diving=active_ev.is_diving
                 )
                 scored_by_id = {s.entry_id: s for s in scored_all}
 
+                h_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
+                h_cols[0].caption("LANE")
+                h_cols[1].caption("TEAM")
+                h_cols[2].caption("ATHLETE / RELAY")
+                h_cols[3].caption("SEED")
+                h_cols[4].caption("PTS" if active_ev.is_diving else "RESULT TIME")
+                h_cols[5].caption("DQ")
+                h_cols[6].caption("SCR")
+                h_cols[7].caption("OFFICIAL")
+                h_cols[8].caption("PLACE")
+                h_cols[9].caption("PTS")
+
                 for r in visible_rows:
                     eid = int(r["entry_id"])
-                    s = scored_by_id.get(eid)
-                    if not s:
+                    c = cand_by_id.get(eid)
+                    if not c:
                         continue
-                    off_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
-                    if s.status == "DQ":
-                        off_str = "DQ"
-                        place_str = "DQ"
-                    elif s.status == "SCRATCH":
-                        off_str = "SCR"
-                        place_str = "-"
-                    else:
-                        off_str = (
-                            str(s.diving_score)
-                            if (active_ev.is_diving and s.diving_score is not None)
-                            else format_time_ms(s.final_time_ms)
-                            if s.final_time_ms
-                            else "-"
-                        )
-                        if s.is_exhibition:
-                            place_str = "EXH"
-                        elif s.place:
-                            place_str = f"{s.place} (JD)" if s.is_jd else str(s.place)
-                        else:
-                            place_str = "-"
+                    existing_res = db_results.get(eid)
+                    default_mark = (
+                        str(existing_res.diving_score)
+                        if (active_ev.is_diving and existing_res and existing_res.diving_score is not None)
+                        else format_time_ms(existing_res.final_time_ms)
+                        if (existing_res and existing_res.final_time_ms)
+                        else ""
+                    )
+                    default_dq = bool(existing_res and existing_res.state == ResultState.DISQUALIFIED)
+                    default_scr = bool(existing_res and existing_res.state == ResultState.SCRATCH)
 
-                    off_cols[7].markdown(f"**{off_str}**")
-                    off_cols[8].markdown(place_str)
-                    off_cols[9].markdown(f"**{s.points:.2f}**")
-                    if s.decision_note:
-                        st.caption(f"Lane {r['lane']} ({s.team_code} {s.athlete_name}): {s.decision_note}")
+                    row_cols = st.columns([0.55, 0.75, 2.35, 0.95, 1.25, 0.55, 0.65, 1.0, 0.65, 0.75])
+                    row_cols[0].markdown(f"**{r['lane']}**")
+                    row_cols[1].markdown(f"`{c.team_code}`")
+                    exh_tag = " *(EXH)*" if c.is_exhibition else ""
+                    row_cols[2].markdown(f"{c.athlete_name}{exh_tag}")
+                    row_cols[3].caption(r["seed_time"])
+
+                    row_cols[4].text_input(
+                        "Time",
+                        value=default_mark,
+                        key=f"mark_{eid}",
+                        label_visibility="collapsed",
+                    )
+                    is_dq = row_cols[5].checkbox(
+                        "DQ",
+                        value=default_dq,
+                        key=f"dq_{eid}",
+                        label_visibility="collapsed",
+                    )
+                    row_cols[6].checkbox(
+                        "SCR",
+                        value=default_scr and not is_dq,
+                        key=f"scr_{eid}",
+                        label_visibility="collapsed",
+                    )
+
+                    s = scored_by_id.get(eid)
+                    if s is not None:
+                        if s.status == "DQ":
+                            off_str = "DQ"
+                            place_str = "DQ"
+                        elif s.status == "SCRATCH":
+                            off_str = "SCR"
+                            place_str = "-"
+                        else:
+                            off_str = (
+                                str(s.diving_score)
+                                if (active_ev.is_diving and s.diving_score is not None)
+                                else format_time_ms(s.final_time_ms)
+                                if s.final_time_ms
+                                else "-"
+                            )
+                            if s.is_exhibition:
+                                place_str = "EXH"
+                            elif s.place:
+                                place_str = f"{s.place} (JD)" if s.is_jd else str(s.place)
+                            else:
+                                place_str = "-"
+
+                        row_cols[7].markdown(f"**{off_str}**")
+                        row_cols[8].markdown(place_str)
+                        row_cols[9].markdown(f"**{s.points:.2f}**")
+                        if s.decision_note:
+                            st.caption(f"Lane {r['lane']} ({s.team_code} {s.athlete_name}): {s.decision_note}")
 
                 if active_user and not selected_meet.is_locked:
                     with st.expander("Judge's Decision (JD) & Place Override", expanded=False):
