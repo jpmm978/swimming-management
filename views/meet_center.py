@@ -109,6 +109,7 @@ def render_meet_center_view(
     st.markdown("## Meet Center")
     active_outbox = outbox or DeckOfflineOutbox()
 
+    # Load meet context early so live Girls & Boys scores can be shown at the top
     teams: list[Team] = []
     team_map: dict[int, Team] = {}
     athletes: list[Athlete] = []
@@ -172,7 +173,8 @@ def render_meet_center_view(
             elif spec and spec.gender == "B":
                 boys_scores[t.code] = boys_scores.get(t.code, Decimal("0.00")) + pts
 
-        live_ev_obj = st.session_state.get("live_score_event_select") or st.session_state.get("live_score_event")
+        # Include live unsaved scores from the currently open event in Tab 3
+        live_ev_obj = st.session_state.get("live_score_event")
         if live_ev_obj is not None:
             live_ev_entries = [e for e in db_entries if e.event_code == live_ev_obj.code]
             if live_ev_entries:
@@ -978,10 +980,8 @@ def render_meet_center_view(
         with tab_live:
             if "live_score_event" not in st.session_state:
                 st.session_state["live_score_event"] = MIAA_STANDARD_EVENTS[0]
-            if "live_score_event_select" not in st.session_state:
-                st.session_state["live_score_event_select"] = st.session_state["live_score_event"]
 
-            current_ev_obj = st.session_state["live_score_event_select"]
+            current_ev_obj = st.session_state["live_score_event"]
             current_ev_idx = next(
                 (i for i, ev in enumerate(MIAA_STANDARD_EVENTS) if ev.code == getattr(current_ev_obj, "code", None)),
                 0,
@@ -993,7 +993,6 @@ def render_meet_center_view(
                 if st.button("◀ Prev", disabled=(current_ev_idx <= 0), key="live_prev_event_btn"):
                     prev_ev = MIAA_STANDARD_EVENTS[current_ev_idx - 1]
                     st.session_state["live_score_event"] = prev_ev
-                    st.session_state["live_score_event_select"] = prev_ev
                     st.session_state[f"live_heat_filter_{selected_meet.id}_{prev_ev.code}"] = "All Heats"
                     st.rerun()
             with next_btn_col:
@@ -1001,13 +1000,13 @@ def render_meet_center_view(
                 if st.button("Next ▶", disabled=(current_ev_idx >= len(MIAA_STANDARD_EVENTS) - 1), key="live_next_event_btn"):
                     next_ev = MIAA_STANDARD_EVENTS[current_ev_idx + 1]
                     st.session_state["live_score_event"] = next_ev
-                    st.session_state["live_score_event_select"] = next_ev
                     st.session_state[f"live_heat_filter_{selected_meet.id}_{next_ev.code}"] = "All Heats"
                     st.rerun()
 
             active_ev = nav_ev_col.selectbox(
                 "Event",
                 options=MIAA_STANDARD_EVENTS,
+                index=current_ev_idx,
                 format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
                 key="live_score_event_select",
             )
