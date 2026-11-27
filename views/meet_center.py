@@ -571,6 +571,137 @@ def render_meet_center_view(
                             )
                             st.rerun()
 
+            with st.expander("3. Direct Event Slot Entry (Event → Heat & Lane → Swimmer)", expanded=False):
+                slot_e1, slot_h1, slot_l1, slot_g1 = st.columns([2.0, 0.8, 0.8, 1.0])
+                slot_event = slot_e1.selectbox(
+                    "Event",
+                    options=[ev for ev in MIAA_STANDARD_EVENTS if not ev.is_relay],
+                    format_func=lambda ev: f"#{ev.event_number} · {ev.name}",
+                    key=f"slot_entry_event_{selected_meet.id}",
+                )
+                slot_heat = int(
+                    slot_h1.number_input(
+                        "Heat",
+                        min_value=1,
+                        max_value=12,
+                        value=1,
+                        key=f"slot_entry_heat_{selected_meet.id}",
+                    )
+                )
+                slot_lane = int(
+                    slot_l1.number_input(
+                        "Lane",
+                        min_value=1,
+                        max_value=selected_meet.lane_count,
+                        value=1,
+                        key=f"slot_entry_lane_{selected_meet.id}",
+                    )
+                )
+                default_gen_filter = (
+                    "Girls" if slot_event.gender == "G" else ("Boys" if slot_event.gender == "B" else "All")
+                )
+                gen_filter_opts = ["Girls", "Boys", "All"]
+                slot_gen_filter = slot_g1.selectbox(
+                    "Swimmer List",
+                    options=gen_filter_opts,
+                    index=gen_filter_opts.index(default_gen_filter),
+                    key=f"slot_entry_gen_{selected_meet.id}_{slot_event.code}",
+                )
+
+                athlete_team_id_map: dict[int, int] = {}
+                for sr in season_rosters:
+                    athlete_team_id_map.setdefault(sr.athlete_id, sr.team_id)
+
+                if slot_gen_filter == "Girls":
+                    pool_athletes = [a for a in athletes if a.gender == "F"]
+                elif slot_gen_filter == "Boys":
+                    pool_athletes = [a for a in athletes if a.gender == "M"]
+                else:
+                    pool_athletes = list(athletes)
+
+                if not pool_athletes:
+                    st.info(f"No swimmers found in the '{slot_gen_filter}' list.")
+                else:
+                    sw_col, tm_col, sd_col, ex_col = st.columns([2.2, 1.3, 1.0, 0.7])
+                    chosen_swimmer = sw_col.selectbox(
+                        "Select Swimmer",
+                        options=pool_athletes,
+                        format_func=lambda a: (
+                            f"{a.last_name}, {a.first_name} "
+                            f"({team_map[athlete_team_id_map[a.id]].code if a.id in athlete_team_id_map and athlete_team_id_map[a.id] in team_map else 'No Team'} · "
+                            f"{a.grad_year or '—'} · {a.gender or '?'})"
+                        ),
+                        key=f"slot_entry_swimmer_{selected_meet.id}_{slot_event.code}_{slot_gen_filter}",
+                    )
+
+                    inferred_team_id = athlete_team_id_map.get(chosen_swimmer.id)
+                    default_t_idx = next(
+                        (i for i, t in enumerate(teams) if t.id == inferred_team_id),
+                        teams.index(selected_team) if selected_team in teams else 0,
+                    )
+                    chosen_slot_team = tm_col.selectbox(
+                        "Team",
+                        options=teams,
+                        index=default_t_idx,
+                        format_func=lambda t: f"{t.code} — {t.name}",
+                        key=f"slot_entry_team_{selected_meet.id}_{chosen_swimmer.id}",
+                    )
+                    slot_seed_str = sd_col.text_input(
+                        "Seed Time",
+                        value="NT",
+                        disabled=slot_event.is_diving,
+                        key=f"slot_entry_seed_{selected_meet.id}_{slot_event.code}_{chosen_swimmer.id}",
+                    )
+                    slot_is_exh = ex_col.checkbox(
+                        "EXH",
+                        value=False,
+                        key=f"slot_entry_exh_{selected_meet.id}_{slot_event.code}_{chosen_swimmer.id}",
+                    )
+
+                    already_entered = any(
+                        not c.is_relay and c.athlete_id == chosen_swimmer.id and c.event_code == slot_event.code
+                        for c in candidates
+                    )
+                    if already_entered:
+                        st.warning(
+                            f"{chosen_swimmer.first_name} {chosen_swimmer.last_name} already has an entry in "
+                            f"#{slot_event.event_number} · {slot_event.name}."
+                        )
+
+                    if st.button(
+                        f"Assign to Heat {slot_heat}, Lane {slot_lane}",
+                        type="primary",
+                        key=f"save_slot_entry_{selected_meet.id}_{slot_event.code}_{chosen_swimmer.id}",
+                    ):
+                        with repo.session() as session:
+                            new_entry = Entry(
+                                meet_id=selected_meet.id,
+                                team_id=chosen_slot_team.id,
+                                athlete_id=chosen_swimmer.id,
+                                event_code=slot_event.code,
+                                is_relay=False,
+                                is_exhibition=slot_is_exh,
+                                seed_time_ms=(
+                                    None if slot_event.is_diving else parse_time_to_ms(slot_seed_str)
+                                ),
+                            )
+                            if hasattr(new_entry, "heat_number"):
+                                new_entry.heat_number = slot_heat
+                            if hasattr(new_entry, "lane_number"):
+                                new_entry.lane_number = slot_lane
+                            session.add(new_entry)
+                            session.flush()
+                            created_id = new_entry.id
+                            session.commit()
+
+                        heat_lane_overrides[created_id] = {"heat": slot_heat, "lane": slot_lane}
+                        st.success(
+                            f"Added {chosen_swimmer.first_name} {chosen_swimmer.last_name} "
+                            f"to #{slot_event.event_number} · {slot_event.name} "
+                            f"(Heat {slot_heat}, Lane {slot_lane})."
+                        )
+                        st.rerun()
+
         violations = validate_nfhs_entries(candidates, lane_count=selected_meet.lane_count)
         relay_notices = get_relay_seeding_notices(candidates)
         if violations:
